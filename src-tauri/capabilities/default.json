@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Permessi della finestra principale del manager",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "updater:default", "process:allow-restart"]
 }

@@ -55,6 +55,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "DSH Desktop Manager ${{ github.ref_name }}"
@@ -62,6 +63,10 @@ jobs:
           releaseDraft: false
           # I tag con suffisso (es. v0.2.0-rc.1) diventano pre-release.
           prerelease: ${{ contains(github.ref_name, '-') }}
+          # Con l'updater configurato, la action carica anche .sig + latest.json
+          # (l'endpoint dell'app punta a releases/latest/download/latest.json).
+          # latest.json va escluso dai checksum SHA256 (cambia firma ad ogni run).
+          updaterJsonPreferNsis: true
 
       # Gli asset caricati da tauri-action sono i file in
       # src-tauri/target/release/bundle: li firmiamo con l'hash SHA256 e
@@ -73,7 +78,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $artifacts = Get-ChildItem -Path src-tauri/target/release/bundle -Recurse -File |
-            Where-Object { $_.Name -like '*.exe' -or $_.Name -like '*.msi' -or $_.Name -like '*.zip' }
+            Where-Object { ($_.Name -like '*.exe' -or $_.Name -like '*.msi' -or $_.Name -like '*.zip') -and $_.Name -ne 'latest.json' -and $_.Name -notlike '*.sig' }
           if (-not $artifacts) { throw 'Nessun artefatto trovato in src-tauri/target/release/bundle.' }
           $lines = foreach ($f in $artifacts) {
             $hash = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash.ToLower()

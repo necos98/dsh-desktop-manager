@@ -444,6 +444,29 @@ select:focus {
   text-align: center;
 }
 
+/* ---------- auto-update manager ---------- */
+.icon-btn.has-update {
+  border-color: var(--ok);
+  color: var(--ok);
+  box-shadow: 0 0 6px rgba(55, 214, 122, 0.5);
+}
+
+.section.update-available {
+  border-color: var(--ok);
+  box-shadow: 0 0 0 1px var(--ok) inset;
+}
+
+.update-status {
+  flex: 1 1 auto;
+}
+
+.update-progress {
+  flex: 1 1 auto;
+  max-width: 460px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
 /* scrollbar */
 ::-webkit-scrollbar {
   width: 10px;

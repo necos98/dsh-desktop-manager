@@ -12,6 +12,9 @@
 // Comandi esposti al frontend (contratto invariato):
 //  detect_windows / list_wsl_distros / probe_wsl / is_port_open /
 //  find_free_port / start_env / stop_env / layout_tabs / open_in_browser / run_update
+//
+// Auto-update: plugin tauri_plugin_updater (check/download/install da
+// latest.json delle GitHub Releases) + tauri_plugin_process (relaunch).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -319,6 +322,8 @@ fn cleanup_started(state: &Procs) {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(Procs {
             inner: Mutex::new(proc::ProcRegistry::default()),
         })

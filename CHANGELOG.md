@@ -6,6 +6,15 @@ pubblicato come Release scaricabile dalla Action `Release`.
 
 ## [Unreleased]
 
+### Added
+
+- Auto-update del manager direttamente dall'app (tauri-plugin-updater): controllo
+  automatico all'avvio, pulsante nella tabbar e sezione "Aggiornamento manager"
+  con download, installazione e riavvio. Artefatti firmati (minisign) e pubblicati
+  come `.sig` + `latest.json` nelle GitHub Releases.
+- Icona Windows multi-risoluzione (ICO con entry 16-256px) per taskbar, barra del
+  titolo e anteprime nitide.
+
 ## [0.2.1] - 2026-09-07
 
 ### Changed

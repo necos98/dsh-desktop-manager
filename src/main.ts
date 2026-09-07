@@ -13,6 +13,13 @@ import {
   type ViewMode,
 } from "./domain/environments";
 import { defaultGateway } from "./infra/envGateway";
+import {
+  checkForManagerUpdate,
+  downloadAndInstallUpdate,
+  type UpdateInfo,
+  type UpdateProgress,
+  type UpdaterPhase,
+} from "./services/appUpdater";
 import { EnvironmentService } from "./services/environmentService";
 import { BrowserSettingsStorage } from "./services/settingsStore";
 import type { RegistryData } from "./types";
@@ -33,6 +40,16 @@ let statusMessage = "";
 let layoutTimer: number | undefined;
 
 let viewMode: ViewMode = { view: "settings" };
+
+// ---------------------------------------------------------------------------
+// Auto-update del manager (Tauri updater: latest.json delle GitHub Releases).
+// ---------------------------------------------------------------------------
+
+let updaterPhase: UpdaterPhase = "idle";
+let updaterInfo: UpdateInfo | null = null;
+let updaterError: string | null = null;
+let updaterProgress: UpdateProgress | null = null;
+let updaterAutoChecked = false;
 
 // ---------------------------------------------------------------------------
 // Persistenza impostazioni: delegata a EnvironmentService/SettingsStore (DIP).
@@ -250,6 +267,74 @@ async function actionUpdate(e: EnvRow): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-update del manager: check manuale + check automatico all'avvio.
+// ---------------------------------------------------------------------------
+
+/** Controlla aggiornamenti del manager (pulsante o check automatico). */
+async function actionCheckManagerUpdate(auto = false): Promise<void> {
+  if (updaterPhase === "checking" || updaterPhase === "downloading" || updaterPhase === "installing") {
+    return;
+  }
+  updaterPhase = "checking";
+  updaterError = null;
+  updaterProgress = null;
+  if (!auto) renderChrome();
+  try {
+    updaterInfo = await checkForManagerUpdate();
+    updaterPhase = updaterInfo ? "available" : "up-to-date";
+  } catch (err) {
+    updaterPhase = "error";
+    updaterError = String(err);
+  }
+  renderChrome();
+  renderDetail();
+}
+
+/** Scarica, installa e riavvia il manager sulla nuova versione. */
+async function actionInstallManagerUpdate(): Promise<void> {
+  if (!updaterInfo || updaterPhase === "downloading" || updaterPhase === "installing") return;
+  updaterPhase = "downloading";
+  updaterError = null;
+  updaterProgress = { downloaded: 0, total: null };
+  renderChrome();
+  renderDetail();
+  try {
+    await downloadAndInstallUpdate((p) => {
+      updaterProgress = { ...p };
+      renderUpdaterProgress();
+    });
+    updaterPhase = "installing";
+    renderChrome();
+    renderDetail();
+    // Su Windows l'installer NSIS chiude l'app da solo; se siamo ancora qui,
+    // l'installazione e' andata a buon fine ma serve un riavvio manuale.
+  } catch (err) {
+    updaterPhase = "error";
+    updaterError = String(err);
+    renderChrome();
+    renderDetail();
+  }
+}
+
+/** Aggiorna solo la barra di progresso senza ridisegnare tutto. */
+function renderUpdaterProgress(): void {
+  const bar = document.getElementById("updaterProgressBar");
+  const label = document.getElementById("updaterProgressLabel");
+  if (!updaterProgress) return;
+  const { downloaded, total } = updaterProgress;
+  const mb = (n: number): string => (n / 1024 / 1024).toFixed(1);
+  if (bar instanceof HTMLProgressElement && total) {
+    bar.max = total;
+    bar.value = downloaded;
+  }
+  if (label) {
+    label.textContent = total
+      ? `${mb(downloaded)} / ${mb(total)} MB`
+      : `Scaricati ${mb(downloaded)} MB…`;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
 
@@ -314,6 +399,20 @@ function renderChrome(): void {
 
   const right = document.createElement("div");
   right.className = "tabbar-right";
+  const updaterBtn = document.createElement("button");
+  updaterBtn.className = "icon-btn" + (updaterPhase === "available" ? " has-update" : "");
+  updaterBtn.id = "updaterBtn";
+  updaterBtn.title = updaterButtonTitle();
+  updaterBtn.textContent = updaterPhase === "available" ? "UP!" : "VER";
+  updaterBtn.disabled = updaterPhase === "checking" || updaterPhase === "downloading" || updaterPhase === "installing";
+  updaterBtn.addEventListener("click", () => {
+    if (updaterPhase === "available") {
+      showSettingsTab();
+    } else {
+      void actionCheckManagerUpdate(false);
+    }
+  });
+  right.appendChild(updaterBtn);
   const refresh = document.createElement("button");
   refresh.className = "icon-btn";
   refresh.title = "Rileva di nuovo gli ambienti";
@@ -324,6 +423,28 @@ function renderChrome(): void {
   bar.appendChild(right);
 
   headerBox.replaceChildren(bar);
+}
+
+/** Testo del tooltip del pulsante updater in base alla fase. */
+function updaterButtonTitle(): string {
+  switch (updaterPhase) {
+    case "checking":
+      return "Controllo aggiornamenti in corso...";
+    case "available":
+      return updaterInfo
+        ? "Aggiornamento manager disponibile: v" + updaterInfo.version + " - apri le Impostazioni"
+        : "Aggiornamento disponibile";
+    case "up-to-date":
+      return "Manager aggiornato - ricontrolla";
+    case "downloading":
+      return "Download aggiornamento in corso...";
+    case "installing":
+      return "Installazione aggiornamento...";
+    case "error":
+      return updaterError ? "Errore aggiornamento: " + updaterError : "Errore controllo aggiornamenti";
+    default:
+      return "Controlla aggiornamenti del manager";
+  }
 }
 
 // badgeStatus: wrapper UI sul dominio (lega il registry corrente). La regola
@@ -411,6 +532,110 @@ function fmtRow(label: string, value: string | null | undefined, mono = false): 
   return row;
 }
 
+/** Sezione "Aggiornamento manager": check/download/install dall'app. */
+function renderManagerUpdateSection(): HTMLElement {
+  const sec = document.createElement("section");
+  sec.className = "section" + (updaterPhase === "available" ? " update-available" : "");
+
+  const title = document.createElement("h3");
+  title.textContent = "Aggiornamento manager";
+  sec.appendChild(title);
+
+  const row = document.createElement("div");
+  row.className = "form-row";
+
+  const status = document.createElement("span");
+  status.className = "form-label update-status";
+  status.textContent = updaterStatusText();
+  row.appendChild(status);
+
+  const checkBtn = document.createElement("button");
+  checkBtn.className = "btn";
+  checkBtn.textContent =
+    updaterPhase === "checking" ? "Controllo..." : "Controlla aggiornamenti";
+  checkBtn.disabled =
+    updaterPhase === "checking" ||
+    updaterPhase === "downloading" ||
+    updaterPhase === "installing";
+  checkBtn.addEventListener("click", () => void actionCheckManagerUpdate(false));
+  row.appendChild(checkBtn);
+
+  if (updaterPhase === "available" && updaterInfo) {
+    const installBtn = document.createElement("button");
+    installBtn.className = "btn accent";
+    installBtn.textContent = "Scarica e installa v" + updaterInfo.version;
+    installBtn.addEventListener("click", () => void actionInstallManagerUpdate());
+    row.appendChild(installBtn);
+  }
+  sec.appendChild(row);
+
+  if (updaterInfo && (updaterPhase === "available" || updaterPhase === "downloading" || updaterPhase === "installing")) {
+    if (updaterInfo.body) {
+      const notes = document.createElement("pre");
+      notes.className = "log-note";
+      notes.textContent = updaterInfo.body.slice(0, 1500);
+      sec.appendChild(notes);
+    }
+  }
+
+  if (updaterPhase === "downloading" && updaterProgress) {
+    const pRow = document.createElement("div");
+    pRow.className = "form-row";
+    const bar = document.createElement("progress");
+    bar.id = "updaterProgressBar";
+    bar.className = "update-progress";
+    if (updaterProgress.total) {
+      bar.max = updaterProgress.total;
+      bar.value = updaterProgress.downloaded;
+    }
+    const label = document.createElement("span");
+    label.id = "updaterProgressLabel";
+    label.className = "info-value";
+    pRow.appendChild(bar);
+    pRow.appendChild(label);
+    sec.appendChild(pRow);
+    // Prima pittura del testo (il resto arriva via renderUpdaterProgress)
+    queueMicrotask(() => renderUpdaterProgress());
+  }
+
+  if (updaterPhase === "installing") {
+    const msg = document.createElement("div");
+    msg.className = "hint";
+    msg.textContent =
+      "Installazione in corso: l'app si chiudera' e si riaprira' aggiornata. Se resta aperta, riavviala manualmente.";
+    sec.appendChild(msg);
+  }
+
+  if (updaterPhase === "error" && updaterError) {
+    const er = document.createElement("div");
+    er.className = "warn-box";
+    er.textContent = "Controllo aggiornamenti fallito: " + updaterError;
+    sec.appendChild(er);
+  }
+
+  return sec;
+}
+
+/** Testo di stato compatto per la sezione updater. */
+function updaterStatusText(): string {
+  switch (updaterPhase) {
+    case "checking":
+      return "Controllo in corso...";
+    case "available":
+      return updaterInfo ? "Disponibile: v" + updaterInfo.version : "Aggiornamento disponibile";
+    case "up-to-date":
+      return "Sei aggiornato";
+    case "downloading":
+      return "Download in corso...";
+    case "installing":
+      return "Installazione...";
+    case "error":
+      return "Errore controllo";
+    default:
+      return "Mai controllato";
+  }
+}
+
 function renderDetail(): void {
   const box = document.getElementById("detailBox");
   if (!box) return;
@@ -436,6 +661,8 @@ function renderDetail(): void {
   head.appendChild(h);
   head.appendChild(st);
   wrap.appendChild(head);
+
+  wrap.appendChild(renderManagerUpdateSection());
 
   // Rilevamento
   const sec1 = document.createElement("section");
@@ -704,4 +931,9 @@ void (async () => {
   window.addEventListener("resize", scheduleLayout);
   // Polling di stato "tranquillo": 5s, niente scritture DOM se nulla cambia
   setInterval(() => void refreshRunningStates(), 5000);
+  // Check aggiornamenti manager all'avvio (silenzioso, una sola volta)
+  if (!updaterAutoChecked) {
+    updaterAutoChecked = true;
+    setTimeout(() => void actionCheckManagerUpdate(true), 3000);
+  }
 })();
