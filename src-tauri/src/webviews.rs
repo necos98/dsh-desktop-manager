@@ -1,5 +1,6 @@
-//! Layout webview figlie (SRP): solo geometria + label/url.
-//! Il codice Tauri resta nel comando layout_tabs; qui vive la logica pura.
+//! Layout webview figlie (SRP): solo geometria + label/url + regola link esterni.
+//! Il codice Tauri resta nel comando layout_tabs; qui vive la logica pura
+//! (piu il lanciatore `open_in_system_browser`, unico punto che tocca l'OS).
 
 use crate::model::{child_webview_label, LayoutInput};
 
@@ -30,6 +31,28 @@ pub fn wanted_url(input: &LayoutInput, label: &str) -> Option<String> {
         .map(|t| t.url.clone())
 }
 
+/// True se l'URL deve aprirsi nel browser di sistema invece che nella webview.
+/// La GUI di DSH vive su 127.0.0.1/localhost: tutto il resto (http/https
+/// esterni, mailto:, ...) e un link esterno. Pura e unit-testata.
+pub fn is_external_url(url: &url::Url) -> bool {
+    let scheme_ok = url.scheme() == "http" || url.scheme() == "https";
+    if !scheme_ok {
+        return true;
+    }
+    !matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1"))
+}
+
+/// Apre l'URL nel browser predefinito dell'utente (Windows: `cmd /C start`).
+/// Usata sia dal comando `open_in_browser` sia dagli handler di navigazione
+/// delle webview figlie. Ritorna Err con il messaggio di sistema.
+pub fn open_in_system_browser(url: &str) -> Result<(), String> {
+    std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,6 +71,17 @@ mod tests {
         assert_eq!(active_label(&input).as_deref(), Some("web-wsl-Ubuntu"));
         assert_eq!(wanted_url(&input, "web-wsl-Ubuntu").as_deref(), Some("http://127.0.0.1:3100"));
         assert!(wanted_url(&input, "web-altro").is_none());
+    }
+    #[test]
+    fn external_urls_go_to_system_browser() {
+        let gui: url::Url = "http://127.0.0.1:3080/?token=abc".parse().unwrap();
+        let loopback: url::Url = "http://localhost:3080/x".parse().unwrap();
+        let docs: url::Url = "https://example.com/guida".parse().unwrap();
+        let mail: url::Url = "mailto:tizio@example.com".parse().unwrap();
+        assert!(!is_external_url(&gui));
+        assert!(!is_external_url(&loopback));
+        assert!(is_external_url(&docs));
+        assert!(is_external_url(&mail));
     }
     #[test]
     fn no_active_when_settings() {

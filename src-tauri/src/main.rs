@@ -22,12 +22,11 @@ mod proc;
 mod util;
 mod webviews;
 
-use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use tauri::{LogicalPosition, LogicalSize, Manager, RunEvent, State, WebviewUrl};
-use tauri::webview::WebviewBuilder;
+use tauri::webview::{NewWindowResponse, WebviewBuilder};
 
 use detect::{detect_windows_sync, list_wsl_distros_with, probe_wsl_with};
 use lifecycle::{
@@ -216,7 +215,23 @@ async fn layout_tabs(app: tauri::AppHandle, input: LayoutInput) -> Result<(), St
         let tab = input.tabs.iter().find(|t| child_webview_label(&t.env_id) == label);
         let url_str = tab.map(|t| t.url.as_str()).unwrap_or("about:blank");
         let url = url::Url::parse(url_str).map_err(|e| format!("URL non valido: {e}"))?;
-        let builder = WebviewBuilder::new(label, WebviewUrl::External(url));
+        // Link esterni (non GUI locale) -> browser predefinito dell'utente:
+        // la navigazione dentro la webview viene cancellata (false) e
+        // `window.open` / target=_blank viene negato dopo aver aperto il browser.
+        let builder = WebviewBuilder::new(label, WebviewUrl::External(url))
+            .on_navigation(|nav_url| {
+                if webviews::is_external_url(nav_url) {
+                    let _ = webviews::open_in_system_browser(nav_url.as_str());
+                    return false;
+                }
+                true
+            })
+            .on_new_window(|nav_url, _features| {
+                if webviews::is_external_url(&nav_url) {
+                    let _ = webviews::open_in_system_browser(nav_url.as_str());
+                }
+                NewWindowResponse::Deny
+            });
         window
             .add_child(builder, visible_pos.clone(), content_size.clone())
             .map_err(|e| format!("creazione webview figlia: {e}"))?;
@@ -251,12 +266,7 @@ async fn layout_tabs(app: tauri::AppHandle, input: LayoutInput) -> Result<(), St
 
 #[tauri::command]
 fn open_in_browser(url: String) -> Result<(), String> {
-    let status = Command::new("cmd")
-        .args(["/C", "start", "", &url])
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    drop(status);
-    Ok(())
+    webviews::open_in_system_browser(&url)
 }
 
 #[tauri::command]
