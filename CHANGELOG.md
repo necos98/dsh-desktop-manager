@@ -6,6 +6,13 @@ pubblicato come Release scaricabile dalla Action `Release`.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-07
+
+### Added
+
+- Icona app ridisegnata: balena bianca in stile emoji su sfondo oceano (+ favicon con emoji balena nella scheda browser).
+- Link esterni delle webview (non GUI locale) aperti nel browser di sistema; `window.open` / target=_blank negati dopo l'apertura.
+
 ## [0.1.0] - 2026-09-07
 
 ### Added
