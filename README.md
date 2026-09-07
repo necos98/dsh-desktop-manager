@@ -75,6 +75,21 @@ npm run release -- 0.2.0-rc.1  # versione esatta (il suffisso -rc.1 la marca pre
 Il tag deve coincidere con la versione nei manifest (lo garantisce lo script);
 la Action fallisce in modo esplicito se tag e manifest divergono.
 
+### Verifica dell'integrita' (SHA256)
+
+Ogni Release contiene anche `SHA256SUMS.txt` con l'hash dell'installer.
+Dopo il download, apri PowerShell nella cartella del file e confronta:
+
+```powershell
+(Get-FileHash .\DSH.Desktop.Manager_0.1.0_x64-setup.exe -Algorithm SHA256).Hash.ToLower()
+Get-Content .\SHA256SUMS.txt   # l'hash qui deve coincidere con quello sopra
+```
+
+Se i due valori coincidono, il file e' esattamente quello compilato dalla
+GitHub Action. Nota: l'installer non e' firmato (Authenticode), quindi
+SmartScreen puo' mostrare "editore sconosciuto": verifica l'hash e poi
+*Ulteriori informazioni → Esegui comunque*.
+
 ## Struttura
 
 ```

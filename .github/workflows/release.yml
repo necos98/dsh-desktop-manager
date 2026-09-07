@@ -58,7 +58,27 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "DSH Desktop Manager ${{ github.ref_name }}"
-          releaseBody: "Installer Windows (NSIS) negli asset qui sotto. Dettagli nel CHANGELOG.md."
+          releaseBody: "Installer Windows (NSIS) negli asset qui sotto, con SHA256SUMS.txt per verificarne l'integrita'. Dettagli nel CHANGELOG.md. Nota: l'installer non e' firmato (Authenticode), quindi SmartScreen puo' mostrare 'editore sconosciuto': Ulteriori informazioni -> Esegui comunque."
           releaseDraft: false
           # I tag con suffisso (es. v0.2.0-rc.1) diventano pre-release.
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+      # Gli asset caricati da tauri-action sono i file in
+      # src-tauri/target/release/bundle: li firmiamo con l'hash SHA256 e
+      # alleghiamo SHA256SUMS.txt alla stessa Release, cosi' chi scarica
+      # puo' verificare che l'installer non sia stato alterato.
+      - name: Publish SHA256 checksums
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $artifacts = Get-ChildItem -Path src-tauri/target/release/bundle -Recurse -File |
+            Where-Object { $_.Name -like '*.exe' -or $_.Name -like '*.msi' -or $_.Name -like '*.zip' }
+          if (-not $artifacts) { throw 'Nessun artefatto trovato in src-tauri/target/release/bundle.' }
+          $lines = foreach ($f in $artifacts) {
+            $hash = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($f.Name)"
+          }
+          $lines | Set-Content -Path SHA256SUMS.txt -Encoding Ascii
+          Get-Content SHA256SUMS.txt
+          gh release upload ${{ github.ref_name }} SHA256SUMS.txt --clobber
