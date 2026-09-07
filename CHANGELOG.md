@@ -6,6 +6,10 @@ pubblicato come Release scaricabile dalla Action `Release`.
 
 ## [Unreleased]
 
+### Changed
+
+- Icona app, anteprima e taskbar: ora usano in toto `./icon.png` (balena), senza reinterpretazioni; rigenerati `icon.ico`/`icon.png`/`32x32`/`128x128`/`256x256` da quello stesso file e favicon web da `/icon.png`.
+
 ## [0.2.0] - 2026-09-07
 
 ### Added
