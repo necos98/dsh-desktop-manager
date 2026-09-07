@@ -6,6 +6,8 @@ pubblicato come Release scaricabile dalla Action `Release`.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-07
+
 ### Added
 
 - Auto-update del manager direttamente dall'app (tauri-plugin-updater): controllo

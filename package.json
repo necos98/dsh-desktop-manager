@@ -1,7 +1,7 @@
 {
   "name": "dsh-desktop-manager",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.3.0",
   "type": "module",
   "description": "Gestore desktop per DeepSeek Harness (DSH): rileva, avvia, aggiorna e apre la GUI di dsh su Windows e distro WSL",
   "scripts": {
