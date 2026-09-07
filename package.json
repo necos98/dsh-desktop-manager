@@ -1,0 +1,30 @@
+{
+  "name": "dsh-desktop-manager",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Gestore desktop per DeepSeek Harness (DSH): rileva, avvia, aggiorna e apre la GUI di dsh su Windows e distro WSL",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "tauri": "tauri",
+    "icons": "node tools/gen-icon.mjs",
+    "release": "node tools/bump-version.mjs --tag --push",
+    "release:patch": "node tools/bump-version.mjs --patch --tag --push",
+    "release:minor": "node tools/bump-version.mjs --minor --tag --push",
+    "release:major": "node tools/bump-version.mjs --major --tag --push"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "jsdom": "^29.1.1",
+    "typescript": "^5.6.0",
+    "vite": "^7.0.0",
+    "vitest": "^5.0.0"
+  }
+}

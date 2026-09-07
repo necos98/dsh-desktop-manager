@@ -1,0 +1,64 @@
+# .github/workflows/release.yml
+# Build + Release: ad ogni tag v* (es. v0.2.0) compila l'installer Windows (NSIS)
+# e lo pubblica come GitHub Release scaricabile.
+#
+# Flusso di rilascio (locale):
+#   npm test
+#   npm run release:minor   # aggiorna la versione, commit, tag vX.Y.Z e push
+# La Action fa il resto: build Tauri su windows-latest e upload degli asset.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust (stable MSVC)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Check tag matches manifest version
+        shell: pwsh
+        run: |
+          $pkg = Get-Content package.json | ConvertFrom-Json
+          $tauri = Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json
+          $cargo = Select-String -Path src-tauri/Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1
+          $cargoVer = $cargo.Matches.Groups[1].Value
+          $expected = "v$($pkg.version)"
+          if ("${{ github.ref_name }}" -ne $expected) { throw "Tag ${{ github.ref_name }} non coincide con package.json ($expected). Usa tools/bump-version.mjs per versionare." }
+          if ($tauri.version -ne $pkg.version) { throw "tauri.conf.json ($($tauri.version)) disallineato da package.json ($($pkg.version))." }
+          if ($cargoVer -ne $pkg.version) { throw "Cargo.toml ($cargoVer) disallineato da package.json ($($pkg.version))." }
+          Write-Host "Versioni allineate: $($pkg.version)"
+
+      - name: Build and publish GitHub Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "DSH Desktop Manager ${{ github.ref_name }}"
+          releaseBody: "Installer Windows (NSIS) negli asset qui sotto. Dettagli nel CHANGELOG.md."
+          releaseDraft: false
+          # I tag con suffisso (es. v0.2.0-rc.1) diventano pre-release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
