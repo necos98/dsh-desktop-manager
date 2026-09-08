@@ -6,9 +6,11 @@ import type {
   EnvProbe,
   EnvTarget,
   LayoutInput,
+  NodeRuntime,
   StartResult,
   StopResult,
   UpdateResult,
+  WslDiag,
   WslDistro,
 } from '../types';
 
@@ -18,8 +20,10 @@ export interface EnvGateway {
   detectWindows(): Promise<EnvProbe>;
   /** Elenca le distro WSL disponibili. */
   listWslDistros(): Promise<WslDistro[]>;
-  /** Verifica dsh dentro una specifica distro WSL. */
-  probeWsl(distro: string): Promise<EnvProbe>;
+  /** Verifica dsh dentro una specifica distro WSL (runtime scelto o null). */
+  probeWsl(distro: string, nodeRuntime?: string | null): Promise<EnvProbe>;
+  /** Runtime Node disponibili nella distro (nvm decrescenti + sistema). */
+  listNodeRuntimes(distro: string): Promise<NodeRuntime[]>;
   /** True se la porta risulta aperta su 127.0.0.1. */
   isPortOpen(port: number): Promise<boolean>;
   /** Trova la prima porta libera partendo da from. */
@@ -34,6 +38,10 @@ export interface EnvGateway {
   openInBrowser(url: string): Promise<void>;
   /** Aggiorna (o installa) dsh all'ambiente con la versione scelta. */
   runUpdate(target: EnvTarget, version: string): Promise<UpdateResult>;
+  /** Coda del log di un ambiente (percorso, coda). */
+  readEnvLog(target: EnvTarget, lines?: number): Promise<[string, string]>;
+  /** Diagnostica WSL passo-passo (mai un throw: vedi WslDiag.error). */
+  diagnoseWsl(distro: string, port: number, nodeRuntime?: string | null): Promise<WslDiag>;
 }
 
 export type InvokeFn = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
@@ -47,8 +55,11 @@ export class TauriEnvGateway implements EnvGateway {
   listWslDistros(): Promise<WslDistro[]> {
     return this.invokeFn<WslDistro[]>("list_wsl_distros");
   }
-  probeWsl(distro: string): Promise<EnvProbe> {
-    return this.invokeFn<EnvProbe>("probe_wsl", { distro });
+  probeWsl(distro: string, nodeRuntime?: string | null): Promise<EnvProbe> {
+    return this.invokeFn<EnvProbe>("probe_wsl", { distro, nodeRuntime: nodeRuntime ?? null });
+  }
+  listNodeRuntimes(distro: string): Promise<NodeRuntime[]> {
+    return this.invokeFn<NodeRuntime[]>("list_node_runtimes", { distro });
   }
   isPortOpen(port: number): Promise<boolean> {
     return this.invokeFn<boolean>("is_port_open", { port });
@@ -70,6 +81,12 @@ export class TauriEnvGateway implements EnvGateway {
   }
   runUpdate(target: EnvTarget, version: string): Promise<UpdateResult> {
     return this.invokeFn<UpdateResult>("run_update", { target, version });
+  }
+  readEnvLog(target: EnvTarget, lines?: number): Promise<[string, string]> {
+    return this.invokeFn<[string, string]>("read_env_log", { target, lines });
+  }
+  diagnoseWsl(distro: string, port: number, nodeRuntime?: string | null): Promise<WslDiag> {
+    return this.invokeFn<WslDiag>("diagnose_wsl", { distro, port, nodeRuntime: nodeRuntime ?? null });
   }
 }
 

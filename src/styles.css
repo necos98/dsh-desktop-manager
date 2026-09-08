@@ -153,6 +153,24 @@ body {
   cursor: not-allowed;
 }
 
+/* Etichetta versione del manager nella tabbar: testo discreto, cliccabile
+   solo quando c'e' un aggiornamento disponibile. */
+.app-version {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  padding: 0 6px;
+  white-space: nowrap;
+  user-select: none;
+  line-height: 30px;
+}
+
+.app-version.has-update {
+  color: var(--ok);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
 /* ---------- layout ---------- */
 .layout {
   flex: 1 1 auto;
@@ -445,11 +463,6 @@ select:focus {
 }
 
 /* ---------- auto-update manager ---------- */
-.icon-btn.has-update {
-  border-color: var(--ok);
-  color: var(--ok);
-  box-shadow: 0 0 6px rgba(55, 214, 122, 0.5);
-}
 
 .section.update-available {
   border-color: var(--ok);

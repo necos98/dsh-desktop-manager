@@ -13,7 +13,11 @@ import {
   showTabEnv,
   tabUrlFor,
   targetOf,
+  toolchainStatus,
+  toolchainWarning,
   upsertEnv,
+  versionChangeOf,
+  versionVerb,
   wslDefaultPort,
   type EnvRow,
 } from './environments';
@@ -57,6 +61,37 @@ describe('desiredVersionOf', () => {
   });
 });
 
+describe('versionChangeOf / versionVerb', () => {
+  const reg2 = registry('2.0.0');
+  it('install quando dsh assente o senza versione', () => {
+    expect(versionChangeOf(row({ probe: null }), reg2)).toBe('install');
+    expect(versionChangeOf(row({ probe: { kind: 'w', name: 'w', installed: false } }), reg2)).toBe('install');
+    expect(versionChangeOf(row({ probe: { kind: 'w', name: 'w', installed: true, version: null } }), reg2)).toBe('install');
+  });
+  it('upgrade / downgrade / reinstall a confronto', () => {
+    const mk = (v: string) => row({ probe: { kind: 'w', name: 'w', installed: true, version: v } });
+    expect(versionChangeOf(mk('1.0.0'), reg2)).toBe('upgrade');
+    expect(versionChangeOf(mk('3.0.0'), reg2)).toBe('downgrade');
+    expect(versionChangeOf(mk('2.0.0'), reg2)).toBe('reinstall');
+  });
+  it('null senza target (registry assente)', () => {
+    expect(versionChangeOf(row({ probe: { kind: 'w', name: 'w', installed: true, version: '1.0.0' } }), null)).toBeNull();
+    expect(versionVerb(null)).toBe('Installazione');
+  });
+  it('verbi italiani per pulsanti e messaggi', () => {
+    expect(versionVerb('install')).toBe('Installazione');
+    expect(versionVerb('upgrade')).toBe('Aggiornamento');
+    expect(versionVerb('downgrade')).toBe('Downgrade');
+    expect(versionVerb('reinstall')).toBe('Reinstallazione');
+  });
+  it('badge downgrade visibile in lista', () => {
+    const e = row({ probe: { kind: 'w', name: 'w', installed: true, version: '3.0.0' } });
+    const b = badgeStatus(e, reg2);
+    expect(b.text).toContain('Downgrade');
+    expect(b.cls).toBe('warn');
+  });
+});
+
 describe('isUpdateAvailable', () => {
   it('true solo se installata < desiderata', () => {
     const reg = registry('2.0.0');
@@ -68,6 +103,41 @@ describe('isUpdateAvailable', () => {
     expect(isUpdateAvailable(row({ probe: null }), registry('2.0.0'))).toBe(false);
     expect(isUpdateAvailable(row({ probe: { kind: 'w', name: 'w', installed: false } }), registry('2.0.0'))).toBe(false);
     expect(isUpdateAvailable(row({ probe: { kind: 'w', name: 'w', installed: true, version: '1.0.0' } }), null)).toBe(false);
+  });
+});
+
+describe('toolchainStatus / toolchainWarning', () => {
+  it('missing quando entrambe false (wsl: nativi + interop ignorata)', () => {
+    const e = row({ kind: 'wsl', distro: 'U', id: 'wsl:U', probe: { kind: 'wsl', name: 'U', installed: false, hasBun: false, hasNpm: false } });
+    expect(toolchainStatus(e.probe)).toBe('missing');
+    expect(toolchainWarning(e)).toContain('bun');
+    expect(toolchainWarning(e)).toContain('nativi');
+    expect(toolchainWarning(e)).toContain('interop');
+    expect(toolchainWarning(e)).toContain('Il manager non installa toolchain');
+  });
+  it('partial con una sola toolchain, nessun avviso', () => {
+    const e = row({ probe: { kind: 'wsl', name: 'U', installed: false, hasBun: true, hasNpm: false } });
+    expect(toolchainStatus(e.probe)).toBe('partial');
+    expect(toolchainWarning(e)).toBeNull();
+  });
+  it('unknown quando non verificata', () => {
+    expect(toolchainStatus(null)).toBe('unknown');
+    expect(toolchainWarning(row({ probe: null }))).toBeNull();
+  });
+  it('ok con entrambe presenti', () => {
+    const e = row({ probe: { kind: 'windows', name: 'W', installed: true, hasBun: true, hasNpm: true } });
+    expect(toolchainStatus(e.probe)).toBe('ok');
+    expect(toolchainWarning(e)).toBeNull();
+  });
+});
+
+describe('badgeStatus con installazione rotta', () => {
+  it('mai vnull: installato senza versione -> Installazione da verificare', () => {
+    const e = row({ probe: { kind: 'wsl', name: 'U', installed: true, version: null, error: 'exec: node: not found' } });
+    const b = badgeStatus(e, null);
+    expect(b.text).toBe('Installazione da verificare');
+    expect(b.text).not.toContain('null');
+    expect(b.cls).toBe('warn');
   });
 });
 
@@ -106,7 +176,7 @@ describe('badgeStatus', () => {
     expect(badgeStatus(row({ busy: true }), reg).cls).toBe('busy');
     expect(badgeStatus(row({ probe: null }), reg)).toEqual({ text: 'Non installato', cls: 'warn' });
     expect(badgeStatus(row({ probe: { kind: 'w', name: 'w', installed: true, version: '1.0.0' } }), reg)).toMatchObject({ cls: 'warn' });
-    expect(badgeStatus(row({ probe: { kind: 'w', name: 'w', installed: true, version: '2.0.0' } }), reg)).toMatchObject({ text: 'v2.0.0', cls: 'idle' });
+    expect(badgeStatus(row({ probe: { kind: 'w', name: 'w', installed: true, version: '2.0.0' } }), reg)).toMatchObject({ text: 'v2.0.0 (reinstallabile)', cls: 'idle' });
   });
 });
 

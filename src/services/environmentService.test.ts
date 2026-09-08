@@ -50,6 +50,9 @@ function fakeGateway(service: { lastStart?: EnvTarget }, opts: FakeOpts = {}): E
     layoutTabs: async () => undefined,
     openInBrowser: async () => undefined,
     runUpdate: async () => ({ ok: true, exitCode: 0, output: 'ok' }) as UpdateResult,
+    readEnvLog: async (target) => [`/tmp/dsh-desktop-manager-${target.port}.log`, 'riga1\nriga2'],
+    diagnoseWsl: async (distro) => ({ distro, dshInstalled: true, dshVersion: '1.0.0', hasBun: true, hasNpm: false, portOpenFromWindows: false, portOpenInDistro: true, logTail: 'tail', state: 'Running', error: null }),
+    listNodeRuntimes: async () => [{ id: '/home/u/.nvm/versions/node/v24.20.0/bin', label: 'nvm v24.20.0 (default)', nodeVersion: 'v24.20.0', isDefault: true, source: 'nvm' }],
   };
 }
 
@@ -140,6 +143,46 @@ describe('EnvironmentService.stopEnvironment / loadRegistry', () => {
   });
 });
 
+describe('EnvironmentService.listRuntimes', () => {
+  it('elenca i runtime della distro', async () => {
+    const { service } = svc();
+    const out = await service.listRuntimes(row({ kind: 'wsl', distro: 'Ubuntu', id: 'wsl:Ubuntu' }));
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.runtimes[0].id).toContain('v24.20.0');
+  });
+  it('su windows -> errore dedicato', async () => {
+    const { service } = svc();
+    expect((await service.listRuntimes(row())).ok).toBe(false);
+  });
+});
+
+describe('EnvironmentService.readEnvironmentLog / diagnoseEnvironment', () => {
+  it('log ok -> percorso e coda', async () => {
+    const { service } = svc();
+    const out = await service.readEnvironmentLog(row());
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.log.tail).toContain('riga1');
+  });
+  it('log fallito -> errore senza throw', async () => {
+    const seen: { lastStart?: EnvTarget } = {};
+    const gw = fakeGateway(seen);
+    gw.readEnvLog = async () => { throw new Error('nessun log'); };
+    const service = new EnvironmentService(gw, new MemorySettingsStorage(), new NpmRegistryClient(async () => { throw new Error('no-net'); }));
+    const out = await service.readEnvironmentLog(row());
+    expect(out.ok).toBe(false);
+  });
+  it('diagnostica wsl -> diag passo-passo', async () => {
+    const { service } = svc();
+    const out = await service.diagnoseEnvironment(row({ kind: 'wsl', distro: 'Ubuntu', id: 'wsl:Ubuntu' }));
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.diag.portOpenInDistro).toBe(true);
+  });
+  it('diagnostica su windows -> errore dedicato', async () => {
+    const { service } = svc();
+    expect((await service.diagnoseEnvironment(row())).ok).toBe(false);
+  });
+});
+
 describe('EnvironmentService.updateEnvironment', () => {
   const reg: RegistryData = { latest: '2.0.0', distTags: { latest: '2.0.0' }, versions: ['2.0.0', '1.0.0'] };
   it('senza target -> errore registry', async () => {
@@ -155,5 +198,32 @@ describe('EnvironmentService.updateEnvironment', () => {
       expect(out.message).toContain('2.0.0');
       expect(out.probe?.version).toBe('2.0.0');
     }
+  });
+  it('downgrade -> verbo Downgrade nel messaggio', async () => {
+    const { service } = svc({ runningProbeVersion: '1.0.0' });
+    const e = row({ probe: probeWin('2.0.0'), settings: { port: 3080, extraArgs: [], workspace: null, desiredVersion: '1.0.0' } });
+    const out = await service.updateEnvironment(e, reg);
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.message).toContain('Downgrade');
+  });
+  it('reinstall stessa versione -> verbo Reinstallazione', async () => {
+    const { service } = svc({ runningProbeVersion: '2.0.0' });
+    const e = row({ probe: probeWin('2.0.0'), settings: { port: 3080, extraArgs: [], workspace: null, desiredVersion: '2.0.0' } });
+    const out = await service.updateEnvironment(e, reg);
+    expect(out.ok).toBe(true);
+    if (out.ok) expect(out.message).toContain('Reinstallazione');
+  });
+  it('ambiente in esecuzione -> stop + riavvio dopo il cambio', async () => {
+    const seen: { lastStart?: EnvTarget } = {};
+    const gw = fakeGateway(seen);
+    let stopped = false;
+    gw.stopEnv = async () => { stopped = true; return { ok: true, message: 'fermato' }; };
+    const service = new EnvironmentService(gw, new MemorySettingsStorage(), new NpmRegistryClient(async () => { throw new Error('no-net'); }));
+    const e = row({ running: true, probe: probeWin('1.0.0'), settings: { port: 3080, extraArgs: [], workspace: null, desiredVersion: '2.0.0' } });
+    const out = await service.updateEnvironment(e, reg);
+    expect(out.ok).toBe(true);
+    expect(stopped).toBe(true);
+    expect(e.running).toBe(true);
+    if (out.ok) expect(out.message).toContain('riavviata');
   });
 });

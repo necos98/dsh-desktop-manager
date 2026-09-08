@@ -5,9 +5,11 @@ import type {
   EnvProbe,
   EnvTarget,
   LayoutInput,
+  NodeRuntime,
   StartResult,
   StopResult,
   UpdateResult,
+  WslDiag,
   WslDistro,
 } from './types';
 
@@ -21,9 +23,14 @@ export function listWslDistros(): Promise<WslDistro[]> {
   return defaultGateway.listWslDistros();
 }
 
-/** Verifica dsh dentro una specifica distro WSL. */
-export function probeWsl(distro: string): Promise<EnvProbe> {
-  return defaultGateway.probeWsl(distro);
+/** Verifica dsh dentro una specifica distro WSL (runtime scelto o null). */
+export function probeWsl(distro: string, nodeRuntime?: string | null): Promise<EnvProbe> {
+  return defaultGateway.probeWsl(distro, nodeRuntime);
+}
+
+/** Runtime Node disponibili nella distro (nvm decrescenti + sistema). */
+export function listNodeRuntimes(distro: string): Promise<NodeRuntime[]> {
+  return defaultGateway.listNodeRuntimes(distro);
 }
 
 /** True se la porta risulta aperta su 127.0.0.1. */
@@ -62,6 +69,16 @@ export function openInBrowser(url: string): Promise<void> {
 /** Aggiorna (o installa) dsh all'ambiente con la versione scelta. */
 export function runUpdate(target: EnvTarget, version: string): Promise<UpdateResult> {
   return defaultGateway.runUpdate(target, version);
+}
+
+/** Coda del log di un ambiente (percorso, coda). */
+export function readEnvLog(target: EnvTarget, lines?: number): Promise<[string, string]> {
+  return defaultGateway.readEnvLog(target, lines);
+}
+
+/** Diagnostica WSL passo-passo (mai un throw: vedi WslDiag.error). */
+export function diagnoseWsl(distro: string, port: number, nodeRuntime?: string | null): Promise<WslDiag> {
+  return defaultGateway.diagnoseWsl(distro, port, nodeRuntime);
 }
 
 export { defaultGateway };

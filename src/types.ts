@@ -10,6 +10,35 @@ export interface EnvProbe {
   executable?: string | null;
   dshHome?: string | null;
   error?: string | null;
+  /** Toolchain rilevata (None = non verificata). Il manager non installa
+   *  mai bun/npm: se mancano entrambe, deve installarle l'utente. */
+  hasBun?: boolean | null;
+  hasNpm?: boolean | null;
+}
+
+/** Un runtime Node rilevato nella distro (comando list_node_runtimes).
+ *  `id` e la dir bin (es. /home/u/.nvm/versions/node/v24.20.0/bin). */
+export interface NodeRuntime {
+  id: string;
+  label: string;
+  nodeVersion?: string | null;
+  isDefault: boolean;
+  source: string; // "nvm" | "system"
+}
+
+/** Diagnostica WSL passo-passo (comando diagnose_wsl): mai un throw,
+ *  l'eventuale fallimento fatale finisce in `error`. */
+export interface WslDiag {
+  distro: string;
+  state?: string | null;
+  dshInstalled: boolean;
+  dshVersion?: string | null;
+  hasBun: boolean;
+  hasNpm: boolean;
+  portOpenInDistro?: boolean | null;
+  portOpenFromWindows: boolean;
+  logTail?: string | null;
+  error?: string | null;
 }
 
 export interface WslDistro {
@@ -25,6 +54,8 @@ export interface EnvTarget {
   port: number;
   extraArgs: string[];
   workspace?: string | null;
+  /** Runtime Node scelto (solo WSL): dir bin o versione nvm. Null = automatico. */
+  nodeRuntime?: string | null;
 }
 
 export interface StartResult {
@@ -60,6 +91,7 @@ export interface EnvSettings {
   extraArgs: string[];
   workspace?: string | null;
   desiredVersion?: string | null; // versione "desiderata" (pinnata) o null = latest
+  nodeRuntime?: string | null; // runtime Node scelto (solo WSL) o null = automatico
 }
 
 export type Settings = Record<string, EnvSettings>;

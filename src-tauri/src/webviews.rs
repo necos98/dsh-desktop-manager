@@ -46,9 +46,12 @@ pub fn is_external_url(url: &url::Url) -> bool {
 /// Usata sia dal comando `open_in_browser` sia dagli handler di navigazione
 /// delle webview figlie. Ritorna Err con il messaggio di sistema.
 pub fn open_in_system_browser(url: &str) -> Result<(), String> {
-    std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .spawn()
+    let mut cmd = std::process::Command::new("cmd");
+    cmd.args(["/C", "start", "", url]);
+    // `cmd /C start` apre il browser e basta: nessun prompt visibile.
+    #[cfg(windows)]
+    { use std::os::windows::process::CommandExt; cmd.creation_flags(0x0800_0000); }
+    cmd.spawn()
         .map(|_| ())
         .map_err(|e| e.to_string())
 }

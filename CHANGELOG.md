@@ -6,6 +6,22 @@ pubblicato come Release scaricabile dalla Action `Release`.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-08
+
+### Added
+
+- Runtime Node selezionabile per distro WSL (nvm decrescenti + sistema): comando `list_node_runtimes`, probe/start/update/diagnostica propagano la scelta, errore esplicito se la dir sparisce.
+- Diagnostica WSL passo-passo (`diagnose_wsl`): checklist stato-distro/dsh/toolchain/porta-dentro/porta-Windows/log-tail, mai un throw (fallimenti in `WslDiag.error`).
+- Direzioni di versione complete: upgrade, downgrade, reinstall e install con verbi italiani dedicati; installazione con versione pinnata e fallback npm.
+- Pannello log per ambiente (`read_env_log`) e preflight WSL fail-fast prima di start/update.
+- Avvisi toolchain nativa (bun/npm ignorano l'interop /mnt/*) quando ne bun ne npm sono presenti.
+
+### Changed
+
+- Comandi WSL atomici senza shell (`wsl -d D -- BIN ARGS...`, niente `bash -lc` composto) con lint anti-simboli-shell nei test.
+- Spawn WSL senza setsid (relay vivo) e nessun prompt lampeggiante per i processi figli su Windows.
+- Helper usati solo dai test (`wsl_which`, `wsl_env_prefix`, `wsl_command_has_shell_symbols`, `all_wsl_commands_for_lint`, `probe_wsl_with`, `preflight_wsl`, `diagnose_wsl_with`) marcati `#[cfg(test)]`: zero warning `dead_code` in `dev`.
+
 ## [0.3.0] - 2026-09-07
 
 ### Added

@@ -45,6 +45,7 @@ export function targetOf(e: EnvRow): EnvTarget {
     port: e.settings.port,
     extraArgs: e.settings.extraArgs,
     workspace: e.settings.workspace ?? null,
+    nodeRuntime: e.kind === "wsl" ? (e.settings.nodeRuntime ?? null) : null,
   };
 }
 
@@ -61,8 +62,75 @@ export function isUpdateAvailable(e: EnvRow, registry: RegistryData | null): boo
   return compareVersions(e.probe.version, target) < 0;
 }
 
+/** Direzione del cambio versione verso la desiderata: upgrade, downgrade,
+ *  reinstall (stessa versione) oppure install (dsh assente). Null quando non
+ *  c'e una versione desiderata selezionabile (registry non raggiungibile).
+ *  Pura: la UI abilita il pulsante per QUALSIASI direzione — il backend
+ *  (bun/npm add|install -g con versione pinnata) sovrascrive in ogni caso. */
+export type VersionChange = "install" | "upgrade" | "downgrade" | "reinstall";
+
+export function versionChangeOf(e: EnvRow, registry: RegistryData | null): VersionChange | null {
+  const target = desiredVersionOf(e, registry);
+  if (!target) return null;
+  if (!e.probe?.installed || !e.probe.version) return "install";
+  const cmp = compareVersions(e.probe.version, target);
+  if (cmp < 0) return "upgrade";
+  if (cmp > 0) return "downgrade";
+  return "reinstall";
+}
+
+/** Verbo italiano per la direzione del cambio (pulsanti + messaggi). */
+export function versionVerb(change: VersionChange | null): string {
+  switch (change) {
+    case "downgrade":
+      return "Downgrade";
+    case "reinstall":
+      return "Reinstallazione";
+    case "upgrade":
+      return "Aggiornamento";
+    default:
+      return "Installazione";
+  }
+}
+
 export function guiUrl(port: number): string {
   return "http://127.0.0.1:" + port;
+}
+
+/** Stato toolchain di un ambiente: "ok" | "partial" (una sola) | "missing" (nessuna) | "unknown".
+ *  Pura: la regola vive qui, la UI mostra solo l'avviso. Nelle distro WSL
+ *  i booleani contano SOLO i binari nativi Linux (l'interop /mnt/* viene
+ *  ignorata dal backend): il manager non installa mai toolchain — se
+ *  mancano entrambe, deve farlo l'utente. */
+export type ToolchainStatus = "ok" | "partial" | "missing" | "unknown";
+
+export function toolchainStatus(probe: EnvProbe | null): ToolchainStatus {
+  const bun = probe?.hasBun ?? null;
+  const npm = probe?.hasNpm ?? null;
+  if (bun === null && npm === null) return "unknown";
+  if (bun === true || npm === true) {
+    return bun === true && npm === true ? "ok" : "partial";
+  }
+  return "missing";
+}
+
+/** Avviso toolchain da mostrare vicino ai pulsanti Installa/Aggiorna.
+ *  Null = nessun avviso (toolchain ok o non verificata). */
+export function toolchainWarning(e: EnvRow): string | null {
+  const native = e.kind === "wsl" ? " nativi" : "";
+  const distro = e.kind === "wsl" ? ` nella distro "${e.distro ?? e.name}"` : " su Windows";
+  switch (toolchainStatus(e.probe)) {
+    case "missing":
+      return (
+        `Attenzione: ne bun ne npm${native} risultano installati${distro} (eventuali copie Windows via interop vengono ignorate: i mondi non condividono installazioni). ` +
+        `Installa prima una toolchain nativa (es. bun da https://bun.sh oppure nodejs/npm della distro), poi installa dsh. ` +
+        `Il manager non installa toolchain da solo.`
+      );
+    case "partial":
+      return null;
+    default:
+      return null;
+  }
 }
 
 export function envById(envs: EnvRow[], id: string): EnvRow | undefined {
@@ -91,8 +159,18 @@ export function badgeStatus(
   if (e.running) return { text: "In esecuzione :" + e.settings.port, cls: "ok" };
   if (e.busy) return { text: "operazione in corso", cls: "busy" };
   if (!e.probe?.installed) return { text: "Non installato", cls: "warn" };
+  if (!e.probe.version) {
+    // dsh rilevato ma `dsh --version` non restituisce semver (tipico wrapper
+    // interop Windows rotto nella distro): mai mostrare "vnull".
+    return { text: "Installazione da verificare", cls: "warn" };
+  }
   if (isUpdateAvailable(e, registry))
     return { text: "Aggiornamento -> v" + desiredVersionOf(e, registry), cls: "warn" };
+  const change = versionChangeOf(e, registry);
+  if (change === "downgrade")
+    return { text: "Downgrade -> v" + desiredVersionOf(e, registry), cls: "warn" };
+  if (change === "reinstall")
+    return { text: "v" + e.probe.version + " (reinstallabile)", cls: "idle" };
   return { text: "v" + e.probe.version, cls: "idle" };
 }
 

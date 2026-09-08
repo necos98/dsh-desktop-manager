@@ -23,8 +23,14 @@ describe('TauriEnvGateway (porta verso il backend)', () => {
     await gw.layoutTabs({ tabbar: 44, width: 1, height: 1, activeEnv: null, tabs: [] });
     await gw.openInBrowser('http://x');
     await gw.runUpdate({ kind: 'windows', name: 'W', distro: null, port: 3080, extraArgs: [], workspace: null }, '1.0.0');
-    expect(calls.map((c) => c.cmd)).toEqual(["detect_windows", "list_wsl_distros", "probe_wsl", "is_port_open", "find_free_port", "start_env", "stop_env", "layout_tabs", "open_in_browser", "run_update"]);
-    expect(calls.find((c) => c.cmd === 'probe_wsl')?.args).toEqual({ distro: 'Ubuntu' });
+    await gw.readEnvLog({ kind: 'wsl', name: 'U', distro: 'U', port: 3100, extraArgs: [], workspace: null }, 50);
+    await gw.diagnoseWsl('U', 3100);
+    await gw.probeWsl('U', '/home/u/.nvm/versions/node/v24.20.0/bin');
+    await gw.listNodeRuntimes('U');
+    await gw.diagnoseWsl('U', 3100, '/home/u/.nvm/versions/node/v24.20.0/bin');
+    expect(calls.map((c) => c.cmd)).toEqual(["detect_windows", "list_wsl_distros", "probe_wsl", "is_port_open", "find_free_port", "start_env", "stop_env", "layout_tabs", "open_in_browser", "run_update", "read_env_log", "diagnose_wsl", "probe_wsl", "list_node_runtimes", "diagnose_wsl"]);
+    expect(calls.find((c) => c.cmd === 'probe_wsl')?.args).toEqual({ distro: 'Ubuntu', nodeRuntime: null });
+    expect(calls.filter((c) => c.cmd === 'probe_wsl')[1]?.args).toEqual({ distro: 'U', nodeRuntime: '/home/u/.nvm/versions/node/v24.20.0/bin' });
     expect(calls.find((c) => c.cmd === 'run_update')?.args).toMatchObject({ version: '1.0.0' });
   });
 

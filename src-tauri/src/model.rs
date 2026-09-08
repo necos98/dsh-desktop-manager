@@ -14,6 +14,12 @@ pub struct EnvProbe {
     pub executable: Option<String>,
     pub dsh_home: Option<String>,
     pub error: Option<String>,
+    /// Toolchain rilevata nell'ambiente (None = non verificata). Serve per
+    /// avvisare l'utente quando ne bun ne npm sono presenti: in quel caso
+    /// installazione/aggiornamento sono impossibili e tocca all'utente
+    /// installarli (il manager non installa mai toolchain da solo).
+    pub has_bun: Option<bool>,
+    pub has_npm: Option<bool>,
 }
 
 impl EnvProbe {
@@ -29,6 +35,8 @@ impl EnvProbe {
             executable: None,
             dsh_home: None,
             error: None,
+            has_bun: None,
+            has_npm: None,
         }
     }
 }
@@ -51,6 +59,30 @@ pub struct EnvTarget {
     #[serde(default)]
     pub extra_args: Vec<String>,
     pub workspace: Option<String>,
+    /// Runtime Node scelto dall'utente (solo WSL): dir bin (es.
+    /// `/home/u/.nvm/versions/node/v24.20.0/bin`) oppure versione nvm
+    /// (es. `v24.20.0`). None = automatico (prima dir che risolve).
+    /// Se punta a qualcosa di sparito -> errore esplicito, mai fallback
+    /// silenzioso (niente lotteria).
+    #[serde(default)]
+    pub node_runtime: Option<String>,
+}
+
+/// Un runtime Node rilevato nella distro (comando `list_node_runtimes`).
+/// `id` e cio che la UI salva in `node_runtime`: la dir bin.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeRuntime {
+    /// Dir bin (es. `/home/u/.nvm/versions/node/v24.20.0/bin`).
+    pub id: String,
+    /// Etichetta UI (es. `nvm v24.20.0 (default)`).
+    pub label: String,
+    /// Versione node (`node --version`), se leggibile.
+    pub node_version: Option<String>,
+    /// True se e il default nvm (alias) o l'unico di sistema.
+    pub is_default: bool,
+    /// Origine: `nvm`, `system`, `bun` (bun include node compat).
+    pub source: String,
 }
 
 #[derive(Serialize)]
@@ -97,6 +129,29 @@ pub struct LayoutInput {
     pub tabs: Vec<TabSpec>,
 }
 
+/// Esito della diagnostica WSL mostrato nel pannello "Diagnostica" della UI.
+/// Mai un errore lanciato: l'eventuale fallimento fatale finisce in `error`,
+/// cosi il frontend puo sempre disegnare la checklist passo-passo.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct WslDiag {
+    pub distro: String,
+    /// Stato da `wsl -l -v` (Running/Stopped/...), None se non elencabile.
+    pub state: Option<String>,
+    pub dsh_installed: bool,
+    pub dsh_version: Option<String>,
+    pub has_bun: bool,
+    pub has_npm: bool,
+    /// Porta aperta vista da dentro la distro (/dev/tcp): distingue
+    /// "server giu" da "server su ma irraggiungibile da Windows (rete WSL2)".
+    pub port_open_in_distro: Option<bool>,
+    /// Porta aperta vista da Windows (stessa sonda di is_port_open).
+    pub port_open_from_windows: bool,
+    /// Ultime righe del log di distro (None se illeggibile/assente).
+    pub log_tail: Option<String>,
+    pub error: Option<String>,
+}
+
 /// Chiave ambiente: "windows" oppure "wsl:<distro>" (usata per Procs e webview).
 /// Pura e unit-testata: cambia solo se cambia lo schema delle chiavi.
 pub fn env_key(t: &EnvTarget) -> String {
@@ -122,7 +177,7 @@ mod tests {
     use super::*;
 
     fn target(kind: &str, distro: Option<&str>) -> EnvTarget {
-        EnvTarget { kind: kind.into(), name: kind.into(), distro: distro.map(|s| s.into()), port: 3080, extra_args: vec![], workspace: None }
+        EnvTarget { kind: kind.into(), name: kind.into(), distro: distro.map(|s| s.into()), port: 3080, extra_args: vec![], workspace: None, node_runtime: None }
     }
 
     #[test]
@@ -145,5 +200,7 @@ mod tests {
         assert!(!p.installed);
         assert_eq!(p.kind, "windows");
         assert!(p.version.is_none());
+        assert!(p.has_bun.is_none());
+        assert!(p.has_npm.is_none());
     }
 }

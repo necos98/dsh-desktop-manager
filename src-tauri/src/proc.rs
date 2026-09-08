@@ -28,6 +28,12 @@ pub trait FsAccess: Send + Sync {
     fn path_exists(&self, path: &Path) -> bool;
 }
 
+/// Flag Windows: nessun prompt lampeggiante per i processi figli.
+/// Solo Windows (`#[cfg(windows)]` agli usi): su altri OS non esiste e i
+/// test restano invariati (il flag non cambia output/exit).
+#[cfg(windows)]
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 pub struct SystemRunner;
 
 impl CommandRunner for SystemRunner {
@@ -37,7 +43,12 @@ impl CommandRunner for SystemRunner {
         let (tx, rx) = mpsc::channel();
         let prog_msg = prog.clone();
         std::thread::spawn(move || {
-            let out = Command::new(&prog).args(&args).output();
+            let mut cmd = Command::new(&prog);
+            cmd.args(&args);
+            // Niente prompt lampeggianti (probe wsl.exe, dsh --version...).
+            #[cfg(windows)]
+            { use std::os::windows::process::CommandExt; cmd.creation_flags(CREATE_NO_WINDOW); }
+            let out = cmd.output();
             let _ = tx.send(out);
         });
         match rx.recv_timeout(timeout) {
@@ -127,12 +138,13 @@ impl ProcRegistry {
 }
 
 pub fn kill_pid_tree(pid: u32) -> bool {
-    let res = Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
+    let mut cmd = Command::new("taskkill");
+    cmd.args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .output();
-    matches!(res, Ok(o) if o.status.success())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    { use std::os::windows::process::CommandExt; cmd.creation_flags(CREATE_NO_WINDOW); }
+    matches!(cmd.output(), Ok(o) if o.status.success())
 }
 
 pub fn home_dir() -> Option<PathBuf> {

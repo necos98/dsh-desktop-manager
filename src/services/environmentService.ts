@@ -8,6 +8,8 @@ import {
   pruneEnvs,
   targetOf,
   upsertEnv,
+  versionVerb,
+  versionChangeOf,
   wslDefaultPort,
   type EnvRow,
 } from '../domain/environments';
@@ -19,7 +21,7 @@ import {
   settingsFor,
   type SettingsStoragePort,
 } from './settingsStore';
-import type { EnvProbe, EnvSettings, RegistryData } from '../types';
+import type { EnvProbe, EnvSettings, EnvTarget, RegistryData, WslDiag } from '../types';
 
 export interface ScanResult {
   envs: EnvRow[];
@@ -47,6 +49,13 @@ export interface RegistryOutcome {
   registry: RegistryData | null;
   error: string | null;
 }
+
+export interface EnvLogOutcome {
+  path: string;
+  tail: string;
+}
+
+export type DiagnoseOutcome = { ok: true; diag: WslDiag } | { ok: false; error: string };
 
 export class EnvironmentService {
   constructor(
@@ -91,7 +100,11 @@ export class EnvironmentService {
     const probes = await Promise.all(
       distros.map(async (d) => {
         try {
-          return { distro: d.name, probe: await this.gateway.probeWsl(d.name) };
+          // Stesso runtime scelto della riga esistente (se gia selezionato):
+          // la scansione non deve mai rimescolare le versioni da sola.
+          const existing = current.find((e) => e.id === "wsl:" + d.name);
+          const rt = existing?.settings.nodeRuntime ?? null;
+          return { distro: d.name, probe: await this.gateway.probeWsl(d.name, rt) };
         } catch (e) {
           return {
             distro: d.name,
@@ -186,22 +199,56 @@ export class EnvironmentService {
     return { message: res.message };
   }
 
-  /** Installa/aggiorna dsh alla versione desiderata e rilegge la probe. */
+  /**
+   * Installa dsh alla versione desiderata e rilegge la probe.
+   * Vale per QUALSIASI direzione: install, upgrade, downgrade, reinstall —
+   * il backend sovrascrive la versione pinnata con bun/npm (-g) in ogni caso.
+   * Dopo il cambio, se l'ambiente era in esecuzione lo si riavvia
+   * (stop+start) cosi la GUI gira davvero sulla nuova versione.
+   */
   async updateEnvironment(e: EnvRow, registry: RegistryData | null): Promise<UpdateOutcome> {
     const target = desiredVersionOf(e, registry);
     if (!target) {
       return { ok: false, error: "Nessuna versione selezionabile (registry non raggiungibile?)." };
     }
-    const verb = e.probe?.installed ? "Aggiornamento" : "Installazione";
+    const verb = versionVerb(versionChangeOf(e, registry));
+    const wasRunning = e.running;
+    if (wasRunning) {
+      try {
+        await this.gateway.stopEnv(targetOf(e));
+      } catch {
+        /* best-effort: la reinstallazione procede comunque */
+      }
+      e.running = false;
+      e.authUrl = null;
+      e.authSentAt = null;
+    }
     const res = await this.gateway.runUpdate(targetOf(e), target);
     const note = res.output.trim().slice(-3000);
     let probe: EnvProbe | null = null;
     try {
-      probe = e.kind === "windows" ? await this.gateway.detectWindows() : await this.gateway.probeWsl(e.distro ?? "");
+      probe = e.kind === "windows"
+        ? await this.gateway.detectWindows()
+        : await this.gateway.probeWsl(e.distro ?? "", e.settings.nodeRuntime ?? null);
     } catch {
       probe = null;
     }
-    if (res.ok) return { ok: true, message: verb + " completato (v" + target + ").", note, probe };
+    if (res.ok) {
+      let message = verb + " completato (v" + target + ").";
+      if (wasRunning) {
+        const restarted = await this.startEnvironment(e);
+        if (restarted.ok && restarted.reached) {
+          e.running = restarted.reached;
+          e.authUrl = restarted.authUrl;
+          e.authSentAt = null;
+          e.settings.port = restarted.port;
+          message += " Istanza riavviata sulla nuova versione.";
+        } else {
+          message += " Riavvia l'ambiente per usare la nuova versione (" + restarted.message + ").";
+        }
+      }
+      return { ok: true, message, note, probe };
+    }
     return { ok: false, error: verb + " fallito (exit " + res.exitCode + ")." };
   }
 
@@ -211,5 +258,43 @@ export class EnvironmentService {
     } catch (e) {
       return { registry: null, error: String(e) };
     }
+  }
+
+  /** Legge la coda del log di un ambiente (mai un throw: errore in outcome). */
+  async readEnvironmentLog(e: EnvRow, lines = 120): Promise<{ ok: true; log: EnvLogOutcome } | { ok: false; error: string }> {
+    try {
+      const [path, tail] = await this.gateway.readEnvLog(targetOf(e), lines);
+      return { ok: true, log: { path, tail } };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
+  }
+
+  /** Diagnostica WSL passo-passo (solo righe wsl; mai un throw). */
+  async diagnoseEnvironment(e: EnvRow): Promise<DiagnoseOutcome> {
+    if (e.kind !== "wsl") return { ok: false, error: "La diagnostica e disponibile solo per le distro WSL." };
+    const distro = e.distro ?? e.name;
+    try {
+      const diag = await this.gateway.diagnoseWsl(distro, e.settings.port, e.settings.nodeRuntime ?? null);
+      return { ok: true, diag };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
+  }
+
+  /** Runtime Node disponibili nella distro (mai un throw). */
+  async listRuntimes(e: EnvRow): Promise<{ ok: true; runtimes: import("../types").NodeRuntime[] } | { ok: false; error: string }> {
+    if (e.kind !== "wsl") return { ok: false, error: "I runtime Node esistono solo nelle distro WSL." };
+    try {
+      const runtimes = await this.gateway.listNodeRuntimes(e.distro ?? e.name);
+      return { ok: true, runtimes };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
+  }
+
+  /** Target backend per log/diagnostica senza esporre targetOf (resta nel dominio). */
+  logTarget(e: EnvRow): EnvTarget {
+    return targetOf(e);
   }
 }

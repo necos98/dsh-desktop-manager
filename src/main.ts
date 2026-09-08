@@ -1,5 +1,6 @@
+import { version as APP_VERSION } from "../package.json";
 import { layoutTabs } from "./api";
-import { compareVersions, tagOf } from "./registry";
+import { tagOf } from "./registry";
 import "./styles.css";
 import {
   TABBAR_H,
@@ -7,9 +8,12 @@ import {
   buildLayoutInput,
   desiredVersionOf as domainDesiredVersionOf,
   envById as domainEnvById,
-  isUpdateAvailable as domainIsUpdateAvailable,
   showTabEnv,
+  toolchainWarning as domainToolchainWarning,
+  versionChangeOf as domainVersionChangeOf,
+  versionVerb as domainVersionVerb,
   type EnvRow,
+  type VersionChange,
   type ViewMode,
 } from "./domain/environments";
 import { defaultGateway } from "./infra/envGateway";
@@ -40,6 +44,42 @@ let statusMessage = "";
 let layoutTimer: number | undefined;
 
 let viewMode: ViewMode = { view: "settings" };
+
+// ---------------------------------------------------------------------------
+// Pannello ambiente: log + diagnostica WSL (stato UI, mai persistito).
+// Log e diagnosi vivono qui (composition root + renderer), le regole di
+// lettura restano in EnvironmentService/gateway (DIP). Per riga selezionata:
+// - envLog: coda del log (path+tail) oppure errore di lettura;
+// - wslDiag: esito passo-passo di diagnose_wsl (solo righe wsl).
+// ---------------------------------------------------------------------------
+
+interface EnvLogView {
+  loading: boolean;
+  path: string | null;
+  tail: string | null;
+  error: string | null;
+}
+
+interface WslDiagView {
+  loading: boolean;
+  diag: import("./types").WslDiag | null;
+  error: string | null;
+}
+
+let envLog: EnvLogView = { loading: false, path: null, tail: null, error: null };
+let envLogOpen = false;
+let wslDiag: WslDiagView = { loading: false, diag: null, error: null };
+let logSeq = 0;
+
+// Cache runtime Node per distro (solo memoria, mai persistita): la scelta
+// persistita vive in settings.nodeRuntime; qui solo l'elenco rilevato.
+interface RuntimesView {
+  loading: boolean;
+  runtimes: import("./types").NodeRuntime[] | null;
+  error: string | null;
+}
+
+let runtimesCache: Record<string, RuntimesView> = {};
 
 // ---------------------------------------------------------------------------
 // Auto-update del manager (Tauri updater: latest.json delle GitHub Releases).
@@ -118,8 +158,10 @@ function desiredVersionOf(e: EnvRow): string | null {
   return domainDesiredVersionOf(e, registry);
 }
 
-function isUpdateAvailable(e: EnvRow): boolean {
-  return domainIsUpdateAvailable(e, registry);
+/** Direzione del cambio verso la versione desiderata (install/upgrade/
+ *  downgrade/reinstall): la UI abilita il pulsante per QUALSIASI direzione. */
+function versionChangeOf(e: EnvRow): VersionChange | null {
+  return domainVersionChangeOf(e, registry);
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +200,7 @@ function scheduleLayout(): void {
 function showEnvTab(envId: string): void {
   const e = envById(envId);
   if (!e) return;
+  if (selectedId !== envId) resetEnvPanels();
   selectedId = envId;
   if (e.running) {
     viewMode = { view: "env", envId };
@@ -169,6 +212,14 @@ function showEnvTab(envId: string): void {
   renderEnvList();
   renderDetail();
   void applyLayout();
+}
+
+/** Azzerra i pannelli log/diagnostica al cambio di ambiente (stato per-riga). */
+function resetEnvPanels(): void {
+  envLog = { loading: false, path: null, tail: null, error: null };
+  envLogOpen = false;
+  wslDiag = { loading: false, diag: null, error: null };
+  logSeq++;
 }
 
 /** Attiva la schermata impostazioni (nasconde le webview di DSH). */
@@ -245,8 +296,28 @@ async function actionUpdate(e: EnvRow): Promise<void> {
     renderAll();
     return;
   }
+  // Blocco preventivo: senza toolchain l'installazione fallirebbe dopo
+  // minuti con un errore oscuro — meglio avvisare subito (l'utente la installa).
+  const toolchainMsg = domainToolchainWarning(e);
+  if (toolchainMsg && !e.probe?.installed) {
+    statusMessage = toolchainMsg;
+    renderAll();
+    return;
+  }
+  const change = versionChangeOf(e);
+  const verb = domainVersionVerb(change);
+  const confirmMsg = change === "downgrade"
+    ? "Passare dsh su " + e.name + " da v" + (e.probe?.version ?? "?") + " a v" + target + " (downgrade)?"
+    : change === "reinstall"
+      ? "Reinstallare dsh v" + target + " su " + e.name + "?"
+      : null;
+  if (confirmMsg && e.running && !window.confirm(confirmMsg + " L'istanza in esecuzione verra fermata e riavviata.")) {
+    return;
+  }
+  if (confirmMsg && !e.running && !window.confirm(confirmMsg)) {
+    return;
+  }
   e.busy = true;
-  const verb = e.probe?.installed ? "Aggiornamento" : "Installazione";
   statusMessage = `${verb} di dsh su ${e.name} alla versione ${target}… (può richiedere alcuni minuti)`;
   renderAll();
   try {
@@ -255,6 +326,13 @@ async function actionUpdate(e: EnvRow): Promise<void> {
       statusMessage = outcome.message;
       e.note = outcome.note;
       if (outcome.probe) e.probe = outcome.probe;
+      if (e.running) {
+        // cambio con istanza attiva: il servizio l'ha riavviata — mostra la tab
+        e.busy = false;
+        renderAll();
+        showEnvTab(e.id);
+        return;
+      }
     } else {
       statusMessage = outcome.error;
     }
@@ -264,6 +342,33 @@ async function actionUpdate(e: EnvRow): Promise<void> {
     e.busy = false;
     renderAll();
   }
+}
+
+/** Carica la coda del log dell'ambiente nel pannello (feedback visivo di cosa succede). */
+async function actionShowLog(e: EnvRow): Promise<void> {
+  const seq = ++logSeq;
+  envLogOpen = true;
+  envLog = { loading: true, path: null, tail: null, error: null };
+  renderDetail();
+  const outcome = await envService.readEnvironmentLog(e);
+  if (seq !== logSeq) return;
+  envLog = outcome.ok
+    ? { loading: false, path: outcome.log.path, tail: outcome.log.tail, error: null }
+    : { loading: false, path: null, tail: null, error: outcome.error };
+  renderDetail();
+}
+
+/** Esegue la diagnostica WSL passo-passo e la mostra nel pannello. */
+async function actionDiagnose(e: EnvRow): Promise<void> {
+  const seq = ++logSeq;
+  wslDiag = { loading: true, diag: null, error: null };
+  renderDetail();
+  const outcome = await envService.diagnoseEnvironment(e);
+  if (seq !== logSeq) return;
+  wslDiag = outcome.ok
+    ? { loading: false, diag: outcome.diag, error: null }
+    : { loading: false, diag: null, error: outcome.error };
+  renderDetail();
 }
 
 // ---------------------------------------------------------------------------
@@ -399,20 +504,15 @@ function renderChrome(): void {
 
   const right = document.createElement("div");
   right.className = "tabbar-right";
-  const updaterBtn = document.createElement("button");
-  updaterBtn.className = "icon-btn" + (updaterPhase === "available" ? " has-update" : "");
-  updaterBtn.id = "updaterBtn";
-  updaterBtn.title = updaterButtonTitle();
-  updaterBtn.textContent = updaterPhase === "available" ? "UP!" : "VER";
-  updaterBtn.disabled = updaterPhase === "checking" || updaterPhase === "downloading" || updaterPhase === "installing";
-  updaterBtn.addEventListener("click", () => {
-    if (updaterPhase === "available") {
-      showSettingsTab();
-    } else {
-      void actionCheckManagerUpdate(false);
-    }
-  });
-  right.appendChild(updaterBtn);
+  const versionEl = document.createElement("span");
+  versionEl.className = "app-version" + (updaterPhase === "available" ? " has-update" : "");
+  versionEl.id = "appVersion";
+  versionEl.textContent = "v" + APP_VERSION;
+  versionEl.title = updaterVersionTitle();
+  if (updaterPhase === "available") {
+    versionEl.addEventListener("click", () => showSettingsTab());
+  }
+  right.appendChild(versionEl);
   const refresh = document.createElement("button");
   refresh.className = "icon-btn";
   refresh.title = "Rileva di nuovo gli ambienti";
@@ -425,8 +525,8 @@ function renderChrome(): void {
   headerBox.replaceChildren(bar);
 }
 
-/** Testo del tooltip del pulsante updater in base alla fase. */
-function updaterButtonTitle(): string {
+/** Tooltip dell'etichetta versione in base alla fase dell'updater. */
+function updaterVersionTitle(): string {
   switch (updaterPhase) {
     case "checking":
       return "Controllo aggiornamenti in corso...";
@@ -443,7 +543,7 @@ function updaterButtonTitle(): string {
     case "error":
       return updaterError ? "Errore aggiornamento: " + updaterError : "Errore controllo aggiornamenti";
     default:
-      return "Controlla aggiornamenti del manager";
+      return "DSH Manager v" + APP_VERSION + " — vedi la sezione Aggiornamento manager";
   }
 }
 
@@ -483,6 +583,7 @@ function renderEnvList(): void {
     card.appendChild(icon);
     card.appendChild(main);
     card.addEventListener("click", () => {
+      if (selectedId !== e.id) resetEnvPanels();
       selectedId = e.id;
       renderEnvList();
       renderDetail();
@@ -671,16 +772,33 @@ function renderDetail(): void {
   stitle.textContent = "Rilevamento dsh";
   sec1.appendChild(stitle);
   const p = e.probe;
-  if (p?.error && !p.installed) {
+  if (p?.error && (!p.installed || !p.version)) {
     const er = document.createElement("div");
     er.className = "warn-box";
-    er.textContent = `Errore rilevamento: ${p.error}`;
+    er.textContent =
+      p.installed && !p.version
+        ? `dsh rilevato ma non funzionante: ${p.error}`
+        : `Errore rilevamento: ${p.error}`;
     sec1.appendChild(er);
   }
   sec1.appendChild(fmtRow("Installato", p?.installed ? "Sì" : "No"));
   sec1.appendChild(fmtRow("Versione installata", p?.installed ? p?.version : null, true));
   sec1.appendChild(fmtRow("Eseguibile", p?.executable, true));
   sec1.appendChild(fmtRow("DSH_HOME", p?.dshHome, true));
+  // Toolchain native (nelle distro WSL l'interop /mnt/* e ignorata dal
+  // backend): l'utente deve installarle da solo — qui solo avviso.
+  const toolchainLine =
+    p?.hasBun === null || p?.hasBun === undefined
+      ? "—"
+      : `${p.hasBun ? "bun ✓" : "bun ✗"} · ${p.hasNpm ? "npm ✓" : "npm ✗"}${e.kind === "wsl" ? " (nativi)" : ""}`;
+  sec1.appendChild(fmtRow("Toolchain (bun/npm)", p ? toolchainLine : null, true));
+  const toolchainMsg = domainToolchainWarning(e);
+  if (toolchainMsg) {
+    const warn = document.createElement("div");
+    warn.className = "warn-box";
+    warn.textContent = toolchainMsg;
+    sec1.appendChild(warn);
+  }
   wrap.appendChild(sec1);
 
   // Versione disponibile / aggiornamento
@@ -738,9 +856,17 @@ function renderDetail(): void {
   if (targetV) {
     sec2.appendChild(fmtRow("Ultima stabile (registry)", registry?.latest ?? null, true));
     if (e.probe?.installed && e.probe.version) {
-      const cmp = compareVersions(e.probe.version, targetV);
-      const upd = cmp < 0 ? `Disponibile: v${targetV} (più recente dell'installata)` : cmp > 0 ? `Installata v${e.probe.version} è più recente di v${targetV}` : `Già alla versione v${e.probe.version}`;
-      sec2.appendChild(fmtRow("Aggiornamento", upd));
+      const change = versionChangeOf(e);
+      const upd = change === "upgrade"
+        ? `Disponibile: v${targetV} (piu recente dell'installata)`
+        : change === "downgrade"
+          ? `Downgrade: v${targetV} (precedente all'installata v${e.probe.version})`
+          : change === "reinstall"
+            ? `Gia alla versione v${e.probe.version} (reinstallabile)`
+            : `Gia alla versione v${e.probe.version}`;
+      sec2.appendChild(fmtRow("Versione", upd));
+    } else if (registryError) {
+      sec2.appendChild(fmtRow("Versione", "registry non raggiungibile: impossibile scegliere la versione"));
     }
   }
   wrap.appendChild(sec2);
@@ -797,7 +923,9 @@ function renderDetail(): void {
   argsLabel.className = "form-label";
   argsLabel.textContent = "Argomenti extra:";
   const argsInput = document.createElement("input");
-  argsInput.placeholder = "es. --host 0.0.0.0 (separati da spazio)";
+  argsInput.placeholder = e.kind === "wsl"
+    ? "es. --host 0.0.0.0 (solo flag semplici, niente simboli shell)"
+    : "es. --host 0.0.0.0 (separati da spazio)";
   argsInput.value = e.settings.extraArgs.join(" ");
   argsInput.addEventListener("change", () => {
     e.settings.extraArgs = argsInput.value.trim().split(/\s+/).filter(Boolean);
@@ -806,6 +934,10 @@ function renderDetail(): void {
   argsRow.appendChild(argsLabel);
   argsRow.appendChild(argsInput);
   sec3.appendChild(argsRow);
+  // Runtime Node (solo WSL): scelta utente persistita, mai lotteria.
+  if (e.kind === "wsl") {
+    sec3.appendChild(renderNodeRuntimeRow(e));
+  }
   wrap.appendChild(sec3);
 
   // Azioni
@@ -827,6 +959,14 @@ function renderDetail(): void {
     mkBtn("■ Ferma", "danger", !e.running || e.busy, () => void actionStop(e)),
   );
   actions.appendChild(
+    mkBtn(envLogOpen ? "↻ Ricarica log" : "Mostra log", "", e.busy || envLog.loading, () => void actionShowLog(e)),
+  );
+  if (e.kind === "wsl") {
+    actions.appendChild(
+      mkBtn("🩺 Diagnostica WSL", "", e.busy || wslDiag.loading, () => void actionDiagnose(e)),
+    );
+  }
+  actions.appendChild(
     mkBtn("Riautentica tab", "", !e.running || !e.authUrl || e.busy, () => {
       e.authSentAt = null;
       statusMessage = `Riautenticazione di ${e.name}: ricarico la tab con l'URL autenticato…`;
@@ -834,14 +974,22 @@ function renderDetail(): void {
       void applyLayout();
     }),
   );
+  // Cambio versione libero: install/upgrade/downgrade/reinstall condividono
+  // lo stesso pulsante (il backend sovrascrive la versione pinnata in ogni
+  // caso). Etichetta dalla direzione reale, mai disabilitato per downgrade.
   if (!e.probe?.installed) {
     actions.appendChild(
       mkBtn(`Installa dsh (v${targetV ?? "?"})`, "accent", e.busy || !targetV, () => void actionUpdate(e)),
     );
   } else {
-    const disabled = e.busy || !targetV || !isUpdateAvailable(e);
+    const change = versionChangeOf(e);
+    const label = change === "downgrade"
+      ? `Downgrade a v${targetV ?? "?"}`
+      : change === "reinstall"
+        ? `Reinstalla v${targetV ?? "?"}`
+        : `Aggiorna a v${targetV ?? "?"}`;
     actions.appendChild(
-      mkBtn(`Aggiorna a v${targetV ?? "?"}`, "accent", disabled, () => void actionUpdate(e)),
+      mkBtn(label, "accent", e.busy || !targetV, () => void actionUpdate(e)),
     );
   }
   wrap.appendChild(actions);
@@ -870,9 +1018,14 @@ function renderDetail(): void {
     hint.className = "hint";
     hint.textContent =
       e.kind === "windows"
-        ? "dsh non trovato su Windows. Installa con il pulsante qui sopra (richiede bun o npm), oppure manualmente: bun add -g @deepseek-ai/dsh"
-        : `dsh non trovato nella distro WSL "${e.name}". Installalo con il pulsante qui sopra (richiede bun o npm dentro la distro), oppure manualmente via terminale WSL.`;
+        ? "dsh non trovato su Windows. Installa con il pulsante qui sopra (richiede bun o npm installati da te), oppure manualmente: bun add -g @deepseek-ai/dsh"
+        : `dsh nativo non trovato nella distro WSL "${e.name}" (eventuali copie Windows via interop vengono ignorate). Installalo con il pulsante qui sopra (richiede bun o npm nativi installati da te dentro la distro), oppure manualmente via terminale WSL.`;
     wrap.appendChild(hint);
+  }
+
+  wrap.appendChild(renderEnvLogSection(e));
+  if (e.kind === "wsl") {
+    wrap.appendChild(renderWslDiagSection(e));
   }
 
   if (e.kind === "wsl" && e.running) {
@@ -884,6 +1037,193 @@ function renderDetail(): void {
   }
 
   box.replaceChildren(wrap);
+}
+
+/** Pannello "Log ambiente": coda del log con percorso, errore o spinner. */
+function renderEnvLogSection(e: EnvRow): HTMLElement {
+  const sec = document.createElement("section");
+  sec.className = "section";
+  const title = document.createElement("h3");
+  title.textContent = "Log ambiente";
+  sec.appendChild(title);
+  if (!envLogOpen && !envLog.loading && !envLog.tail && !envLog.error) {
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    hint.textContent =
+      "Qui vedi cosa sta facendo dsh: premi «Mostra log» per leggere la coda del log " +
+      (e.kind === "windows" ? "Windows." : `della distro "${e.name}".`);
+    sec.appendChild(hint);
+    return sec;
+  }
+  if (envLog.loading) {
+    const loading = document.createElement("div");
+    loading.className = "hint";
+    loading.textContent = "Lettura log in corso…";
+    sec.appendChild(loading);
+    return sec;
+  }
+  if (envLog.error) {
+    const er = document.createElement("div");
+    er.className = "warn-box";
+    er.textContent = envLog.error;
+    sec.appendChild(er);
+    return sec;
+  }
+  if (envLog.path) sec.appendChild(fmtRow("File", envLog.path, true));
+  const pre = document.createElement("pre");
+  pre.className = "log-note";
+  pre.textContent = envLog.tail ?? "(log vuoto)";
+  sec.appendChild(pre);
+  return sec;
+}
+
+/** Pannello "Diagnostica WSL": checklist passo-passo (stato, dsh, toolchain, porte, log). */
+function renderWslDiagSection(e: EnvRow): HTMLElement {
+  const sec = document.createElement("section");
+  sec.className = "section";
+  const title = document.createElement("h3");
+  title.textContent = "Diagnostica WSL";
+  sec.appendChild(title);
+  if (!wslDiag.loading && !wslDiag.diag && !wslDiag.error) {
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    hint.textContent =
+      "Se l'avvio fallisce, premi «🩺 Diagnostica WSL»: controlla in sequenza distro, dsh nativo, toolchain native bun/npm, porte e log (l'interop Windows /mnt/* viene ignorata).";
+    sec.appendChild(hint);
+    return sec;
+  }
+  if (wslDiag.loading) {
+    const loading = document.createElement("div");
+    loading.className = "hint";
+    loading.textContent = `Diagnostica della distro "${e.distro ?? e.name}" in corso (puo richiedere fino a 2 minuti al primo avvio)…`;
+    sec.appendChild(loading);
+    return sec;
+  }
+  if (wslDiag.error) {
+    const er = document.createElement("div");
+    er.className = "warn-box";
+    er.textContent = wslDiag.error;
+    sec.appendChild(er);
+    return sec;
+  }
+  const d = wslDiag.diag;
+  if (!d) return sec;
+  const mark = (ok: boolean | null | undefined): string => (ok === true ? "✓" : ok === false ? "✗" : "?");
+  sec.appendChild(fmtRow("Distro (stato)", `${d.distro} (${d.state ?? "sconosciuto"})`, true));
+  sec.appendChild(fmtRow("dsh", d.dshInstalled ? `installato${d.dshVersion ? ` (v${d.dshVersion})` : ""}` : "non trovato", true));
+  sec.appendChild(fmtRow("Toolchain nativa", `bun ${mark(d.hasBun)} · npm ${mark(d.hasNpm)}`, true));
+  const portLine =
+    `nella distro: ${d.portOpenInDistro === true ? "aperta ✓" : d.portOpenInDistro === false ? "chiusa ✗" : "non verificata ?"} · ` +
+    `da Windows: ${d.portOpenFromWindows ? "aperta ✓" : "chiusa ✗"} (porta ${e.settings.port})`;
+  sec.appendChild(fmtRow("Porta", portLine));
+  if (!d.hasBun && !d.hasNpm) {
+    const warn = document.createElement("div");
+    warn.className = "warn-box";
+    warn.textContent =
+      `Nella distro "${d.distro}" mancano sia bun che npm nativi (eventuali copie Windows via interop vengono ignorate): installa prima una toolchain nativa ` +
+      `(es. \`curl -fsSL https://bun.sh/install | bash\` oppure \`sudo apt install nodejs npm\`), poi installa dsh. ` +
+      `Il manager non installa toolchain da solo.`;
+    sec.appendChild(warn);
+  }
+  if (d.portOpenInDistro === true && !d.portOpenFromWindows) {
+    const warn = document.createElement("div");
+    warn.className = "warn-box";
+    warn.textContent =
+      "Il server risponde DENTRO la distro ma non da Windows: tipico WSL2 in modalita NAT. " +
+      "Aggiungi --host 0.0.0.0 negli argomenti extra e riavvia.";
+    sec.appendChild(warn);
+  }
+  if (d.error) {
+    const er = document.createElement("div");
+    er.className = "warn-box";
+    er.textContent = d.error;
+    sec.appendChild(er);
+  }
+  if (d.logTail) {
+    const pre = document.createElement("pre");
+    pre.className = "log-note";
+    pre.textContent = d.logTail;
+    sec.appendChild(pre);
+  }
+  return sec;
+}
+
+/** Riga "Runtime Node" (solo WSL): select tra Automatico e versioni rilevate.
+ *  La scelta si salva in settings.nodeRuntime e si riusa in probe/start/
+ *  update/diag (stesso mondo ovunque). Scelta sparita -> errore esplicito
+ *  dal backend al prossimo avvio (mai fallback silenzioso). */
+function renderNodeRuntimeRow(e: EnvRow): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "form-row";
+  const label = document.createElement("span");
+  label.className = "form-label";
+  label.textContent = "Runtime Node:";
+  row.appendChild(label);
+  const sel = document.createElement("select");
+  sel.id = "nodeRuntimeSelect";
+  const cached = runtimesCache[e.id];
+  const optAuto = document.createElement("option");
+  optAuto.value = "";
+  optAuto.textContent = "Automatico (piu recente)";
+  sel.appendChild(optAuto);
+  if (cached?.runtimes) {
+    for (const r of cached.runtimes) {
+      const opt = document.createElement("option");
+      opt.value = r.id;
+      opt.textContent = r.label + (r.nodeVersion ? ` — ${r.nodeVersion}` : "");
+      sel.appendChild(opt);
+    }
+    // Scelta salvata ma non piu rilevata: voce esplicita (non sparisce).
+    if (e.settings.nodeRuntime && !cached.runtimes.some((r) => r.id === e.settings.nodeRuntime)) {
+      const opt = document.createElement("option");
+      opt.value = e.settings.nodeRuntime;
+      opt.textContent = `Non disponibile: ${e.settings.nodeRuntime} (riseleziona)`;
+      sel.appendChild(opt);
+    }
+    sel.value = e.settings.nodeRuntime ?? "";
+  } else if (cached?.loading) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "Rilevamento runtime…";
+    sel.appendChild(opt);
+  } else {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = cached?.error ? "Errore elenco (riprova)" : "Carica…";
+    sel.appendChild(opt);
+    // Carica una volta sola per riga (cache per id ambiente).
+    if (!cached) {
+      runtimesCache[e.id] = { loading: true, runtimes: null, error: null };
+      void envService.listRuntimes(e).then((out) => {
+        runtimesCache[e.id] = out.ok
+          ? { loading: false, runtimes: out.runtimes, error: null }
+          : { loading: false, runtimes: null, error: out.error };
+        // Ridisegna solo se la riga e ancora selezionata.
+        if (selectedId === e.id) renderDetail();
+      });
+    }
+  }
+  sel.addEventListener("change", () => {
+    e.settings.nodeRuntime = sel.value || null;
+    saveSettings();
+    statusMessage = sel.value
+      ? `Runtime Node impostato su ${sel.selectedOptions[0]?.textContent ?? sel.value}: la prossima scansione usera quello.`
+      : "Runtime Node su Automatico: verra usata la versione piu recente.";
+    renderAll();
+    // Re-probe immediata col runtime scelto (feedback subito, non al giro dopo).
+    void (async () => {
+      const rt = e.settings.nodeRuntime ?? null;
+      try {
+        const { defaultGateway } = await import("./infra/envGateway");
+        e.probe = await defaultGateway.probeWsl(e.distro ?? "", rt);
+      } catch (err) {
+        statusMessage = `Re-probe fallita: ${String(err)}`;
+      }
+      renderAll();
+    })();
+  });
+  row.appendChild(sel);
+  return row;
 }
 
 function emptyState(): HTMLDivElement {

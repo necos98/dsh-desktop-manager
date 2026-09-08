@@ -9,9 +9,11 @@
 //  - lifecycle.rs start/stop/update/log/auth-url dietro le porte
 //  - webviews.rs  geometria/label/url puri per layout_tabs
 //
-// Comandi esposti al frontend (contratto invariato):
-//  detect_windows / list_wsl_distros / probe_wsl / is_port_open /
-//  find_free_port / start_env / stop_env / layout_tabs / open_in_browser / run_update
+// Comandi esposti al frontend:
+//  detect_windows / list_wsl_distros / probe_wsl(distro, node_runtime?) /
+//  list_node_runtimes(distro) / is_port_open / find_free_port /
+//  start_env / stop_env / layout_tabs / open_in_browser / run_update /
+//  read_env_log / diagnose_wsl(distro, port, node_runtime?)
 //
 // Auto-update: plugin tauri_plugin_updater (check/download/install da
 // latest.json delle GitHub Releases) + tauri_plugin_process (relaunch).
@@ -31,15 +33,14 @@ use std::time::Duration;
 use tauri::{LogicalPosition, LogicalSize, Manager, RunEvent, State, WebviewUrl};
 use tauri::webview::{NewWindowResponse, WebviewBuilder};
 
-use detect::{detect_windows_sync, list_wsl_distros_with, probe_wsl_with};
+use detect::{detect_windows_sync, list_node_runtimes_with, list_wsl_distros_with, probe_wsl_with_runtime};
 use lifecycle::{
-    find_auth_url_sync, find_free_port_with, run_update_with, start_windows_with, start_wsl_with,
-    stop_wsl_with, SystemSpawner,
+    diagnose_wsl_with_runtime, find_auth_url_sync, find_free_port_with, read_env_log_with,
+    run_update_with, start_windows_with, start_wsl_with, stop_wsl_with, SystemSpawner,
 };
-use crate::proc::CommandRunner;
 use model::{
-    child_webview_label, env_key, EnvProbe, EnvTarget, LayoutInput, StartResult, StopResult,
-    UpdateResult, WslDistro,
+    child_webview_label, env_key, EnvProbe, EnvTarget, LayoutInput, NodeRuntime, StartResult,
+    StopResult, UpdateResult, WslDiag, WslDistro,
 };
 
 /// Stato gestito: processi avviati dal manager (mai quelli esterni).
@@ -73,6 +74,8 @@ async fn detect_windows() -> EnvProbe {
         executable: None,
         dsh_home: None,
         error: Some(e),
+        has_bun: None,
+        has_npm: None,
     })
 }
 
@@ -82,14 +85,61 @@ async fn list_wsl_distros() -> Result<Vec<WslDistro>, String> {
 }
 
 #[tauri::command]
-async fn probe_wsl(distro: String) -> Result<EnvProbe, String> {
-    let d = distro.clone();
-    blocking(move || probe_wsl_with(&proc::SystemRunner, &d)).await
+async fn probe_wsl(distro: String, node_runtime: Option<String>) -> Result<EnvProbe, String> {
+    blocking(move || probe_wsl_with_runtime(&proc::SystemRunner, &distro, node_runtime.as_deref())).await
+}
+
+/// Runtime Node disponibili nella distro (nvm decrescenti + sistema).
+/// Mai un Err lanciato per "nessun runtime": lista vuota (la UI mostra
+/// l'avviso toolchain). Solo errori di distro irraggiungibile.
+#[tauri::command]
+async fn list_node_runtimes(distro: String) -> Result<Vec<NodeRuntime>, String> {
+    blocking(move || Ok(list_node_runtimes_with(&proc::SystemRunner, &distro))).await
 }
 
 #[tauri::command]
 async fn is_port_open(port: u16) -> bool {
     blocking(move || Ok(proc::is_port_open_inner(port))).await.unwrap_or(false)
+}
+
+/// Coda del log di un ambiente (Windows file / WSL /tmp nella distro).
+/// Ritorna (percorso, coda): la UI li mostra nel pannello log dell'ambiente.
+#[tauri::command]
+async fn read_env_log(target: EnvTarget, lines: Option<usize>) -> Result<(String, String), String> {
+    let n = lines.unwrap_or(120);
+    blocking(move || {
+        read_env_log_with(
+            &proc::SystemRunner,
+            &proc::SystemRunner,
+            &target.kind,
+            target.distro.as_deref(),
+            target.port,
+            n,
+        )
+    })
+    .await
+}
+
+/// Diagnostica WSL passo-passo (elenco distro, probe, porte, coda log).
+/// Non lancia mai: i fallimenti finiscono in `WslDiag.error`.
+/// Stesso runtime scelto della probe (coerenza probe/start/update/diag).
+#[tauri::command]
+async fn diagnose_wsl(distro: String, port: u16, node_runtime: Option<String>) -> WslDiag {
+    let d = distro.clone();
+    blocking(move || Ok(diagnose_wsl_with_runtime(&proc::SystemRunner, &proc::SystemRunner, &proc::SystemRunner, &d, port, 40, node_runtime.as_deref())))
+        .await
+        .unwrap_or_else(|e: String| WslDiag {
+            distro,
+            state: None,
+            dsh_installed: false,
+            dsh_version: None,
+            has_bun: false,
+            has_npm: false,
+            port_open_in_distro: None,
+            port_open_from_windows: false,
+            log_tail: None,
+            error: Some(e),
+        })
 }
 
 #[tauri::command]
@@ -110,7 +160,7 @@ async fn start_env(state: State<'_, Procs>, target: EnvTarget) -> Result<StartRe
             let exe = detect_windows_sync().executable;
             start_windows_with(&runner, &runner, &spawner, move || exe.clone(), &closure_target, |ms| std::thread::sleep(std::time::Duration::from_millis(ms)))
         } else {
-            start_wsl_with(&runner, &runner, &spawner, &closure_target, |ms| std::thread::sleep(std::time::Duration::from_millis(ms)))
+            start_wsl_with(&runner, &runner, &runner, &spawner, &closure_target, |ms| std::thread::sleep(std::time::Duration::from_millis(ms)))
         }?;
         // Server raggiungibile: acquisisce l'URL autenticato (?token=) dal log.
         // Se non compare in tempo, l'avvio resta valido (modalita' degradata).
@@ -311,11 +361,17 @@ fn cleanup_started(state: &Procs) {
     let wsl_keys: Vec<String> = state.inner.lock().unwrap().wsl_started.clone();
     for key in wsl_keys {
         if let Some(distro) = key.strip_prefix("wsl:") {
-            let script = r#"export PATH="$HOME/.bun/bin:$PATH";pkill -f 'dsh web' || true"#;
-            let mut args = detect::wsl_args_after(distro);
-            args.push(script.to_string());
-            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let _ = proc::SystemRunner.run_capture("wsl.exe", &arg_refs, Duration::from_secs(15));
+            // Cleanup atomico best-effort (niente shell): HOME, poi pkill
+            // con PATH nativo via `env`. Errori ignorati (si sta uscendo).
+            let runner = proc::SystemRunner;
+            if let Ok(home) = detect::wsl_home_dir(&runner, distro) {
+                let path = detect::wsl_native_path(&home);
+                let mut args = detect::wsl_args_after(distro);
+                args.extend(["env".into(), format!("PATH={path}"), "pkill".into(), "-f".into(), "dsh.web".into()]);
+                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                use crate::proc::CommandRunner;
+                let _ = runner.run_capture("wsl.exe", &arg_refs, Duration::from_secs(15));
+            }
         }
     }
 }
@@ -331,13 +387,16 @@ fn main() {
             detect_windows,
             list_wsl_distros,
             probe_wsl,
+            list_node_runtimes,
             is_port_open,
             find_free_port,
             start_env,
             stop_env,
             layout_tabs,
             open_in_browser,
-            run_update
+            run_update,
+            read_env_log,
+            diagnose_wsl
         ])
         .build(tauri::generate_context!())
         .expect("errore durante l'avvio di DSH Desktop Manager")
