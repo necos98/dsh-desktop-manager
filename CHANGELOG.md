@@ -8,6 +8,8 @@ pubblicato come Release scaricabile dalla Action `Release`.
 
 ## [0.4.0] - 2026-09-08
 
+## [0.4.0] - 2026-09-08
+
 ### Added
 
 - Runtime Node selezionabile per distro WSL (nvm decrescenti + sistema): comando `list_node_runtimes`, probe/start/update/diagnostica propagano la scelta, errore esplicito se la dir sparisce.
