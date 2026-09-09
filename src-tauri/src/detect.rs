@@ -564,6 +564,7 @@ pub fn wsl_which(runner: &dyn CommandRunner, distro: &str, home: &str, bin: &str
 /// versione e stato reali. `dsh_native_path`: percorso classificato nativo
 /// (mai /mnt/*); `dsh_version`: versione nota dall'ultima sonda completa.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct CachedDistro {
     pub name: String,
     pub state: String,
@@ -732,6 +733,10 @@ pub fn wsl_port_check_argv(port: u16) -> Vec<String> {
 /// HOME e toolchain provengono dalla cache (`CachedDistro`); dsh vale solo
 /// se la versione e nota. La sonda completa (`probe_wsl_with_runtime`)
 /// arricchisce la riga in background. Pura (nessun I/O): testabile senza fake.
+/// Nota: la produzione dipinge dal frontend (`staleProbeFor` in
+/// environmentService.ts, stessa regola); questa gemella Rust resta per i
+/// test di parita e per futuri usi backend.
+#[cfg(test)]
 pub fn stale_probe_for(
     distro: &str,
     cached: Option<&CachedDistro>,

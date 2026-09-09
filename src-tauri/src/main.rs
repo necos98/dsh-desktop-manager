@@ -163,14 +163,15 @@ async fn probe_wsl(distro: String, node_runtime: Option<String>) -> Result<EnvPr
 /// Sonda WSL veloce a singolo spawn (avvio + refresh): per N distro costa
 /// ~N spawn invece di ~5-9N. Timeout caldo di default; la prima sonda dopo
 /// un boot freddo usa WSL_BOOT_TIMEOUT (vedi `scan_boot`).
+/// `wsl_state`: stato distro da `wsl -l -v` (Running -> timeout caldo).
 #[tauri::command]
 async fn probe_wsl_fast(
     distro: String,
-    state: Option<String>,
+    wsl_state: Option<String>,
     boot_cache: State<'_, WslBootCache>,
 ) -> Result<EnvProbe, String> {
     let t0 = Instant::now();
-    let timeout = boot_cache.timeout_for(&distro, state.as_deref());
+    let timeout = boot_cache.timeout_for(&distro, wsl_state.as_deref());
     let distro_for_cache = distro.clone();
     let out = blocking(move || probe_wsl_fast_with(&proc::SystemRunner, &distro, timeout)).await;
     if out.is_ok() {
@@ -255,6 +256,7 @@ async fn scan_boot(boot_cache: State<'_, WslBootCache>) -> Result<BootScan, Stri
 
 /// Elenco distro + cache per la prima pittura (vedi `scan_boot`).
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct BootScan {
     distros: Vec<WslDistro>,
     cached: Vec<CachedDistro>,

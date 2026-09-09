@@ -4,6 +4,7 @@ import type { EnvGateway } from '../infra/envGateway';
 import { NpmRegistryClient } from '../infra/registryClient';
 import { MemorySettingsStorage } from './settingsStore';
 import { EnvironmentService } from './environmentService';
+import { staleProbeFor } from './environmentService';
 import type { EnvProbe, EnvTarget, RegistryData, StartResult, StopResult, UpdateResult, WslDistro } from '../types';
 
 const probeWin = (version: string | null = '1.0.0'): EnvProbe => ({ kind: 'windows', name: 'Windows', installed: version !== null, version });
@@ -39,6 +40,23 @@ function fakeGateway(service: { lastStart?: EnvTarget }, opts: FakeOpts = {}): E
       if (opts.failList) throw new Error('wsl assente');
       return opts.distros ?? [];
     },
+    scanBoot: async () => {
+      if (opts.failList) throw new Error('wsl assente');
+      const distros = opts.distros ?? [];
+      return {
+        distros,
+        cached: distros.map((d) => ({
+          name: d.name,
+          state: d.state,
+          home: '/home/u',
+          hasBun: true,
+          hasNpm: false,
+          dshNativePath: '/home/u/.bun/bin/dsh',
+          dshVersion: '1.0.0',
+        })),
+      };
+    },
+    probeWslFast: async (d) => probeWsl(d),
     probeWsl: async (d) => probeWsl(d),
     isPortOpen: async (p) => (opts.portsOpen ?? []).includes(p),
     findFreePort: async (from) => from,
@@ -93,6 +111,103 @@ describe('EnvironmentService.scanEnvironments', () => {
   });
 });
 
+describe('EnvironmentService.scanBootFast (prima pittura)', () => {
+  it('dipinge subito windows + distro senza sonde per-distro', async () => {
+    const seen: { lastStart?: EnvTarget } = {};
+    let probes = 0;
+    const gw = fakeGateway(seen, { distros: [{ name: 'Ubuntu', state: 'Running' }] });
+    gw.probeWsl = async (d) => { probes++; return probeWsl(d); };
+    gw.probeWslFast = async (d) => { probes++; return probeWsl(d); };
+    const service = new EnvironmentService(gw, new MemorySettingsStorage(), new NpmRegistryClient(async () => { throw new Error("no-net"); }));
+    const { envs, status } = await service.scanBootFast([]);
+    expect(status).toBe('');
+    expect(envs.map((e) => e.id)).toEqual(['windows', 'wsl:Ubuntu']);
+    expect(probes).toBe(0);
+    // La riga usa la cache (versione nota, toolchain dalla cache).
+    const wsl = envs.find((e) => e.id === 'wsl:Ubuntu')!;
+    expect(wsl.probe?.version).toBe('1.0.0');
+    expect(wsl.probe?.hasBun).toBe(true);
+  });
+
+  it('distro senza cache -> probe null (in attesa, mai "Non installato" falso)', async () => {
+    const seen: { lastStart?: EnvTarget } = {};
+    const gw = fakeGateway(seen, { distros: [{ name: 'Nuova', state: 'Stopped' }] });
+    gw.scanBoot = async () => ({ distros: [{ name: 'Nuova', state: 'Stopped' }], cached: [] });
+    const service = new EnvironmentService(gw, new MemorySettingsStorage(), new NpmRegistryClient(async () => { throw new Error("no-net"); }));
+    const { envs } = await service.scanBootFast([]);
+    expect(envs.find((e) => e.id === 'wsl:Nuova')?.probe).toBeNull();
+  });
+
+  it('errore boot -> status non fatale e solo windows', async () => {
+    const { service } = svc({ failList: true });
+    const { envs, status } = await service.scanBootFast([]);
+    expect(envs).toHaveLength(1);
+    expect(status).toContain('Errore elenco WSL');
+  });
+});
+
+describe('EnvironmentService.enrichRow (arricchimento background)', () => {
+  it('wsl senza runtime scelto -> sonda veloce con stato', async () => {
+    const seen: { lastStart?: EnvTarget } = {};
+    const gw = fakeGateway(seen);
+    let fastArgs: [string, string | null | undefined][] = [];
+    gw.probeWslFast = async (d, s) => { fastArgs.push([d, s]); return probeWsl(d); };
+    const service = new EnvironmentService(gw, new MemorySettingsStorage(), new NpmRegistryClient(async () => { throw new Error("no-net"); }));
+    const e = row({ kind: 'wsl', distro: 'Ubuntu', id: 'wsl:Ubuntu', wslState: 'Running', probe: null });
+    const probe = await service.enrichRow(e);
+    expect(probe.installed).toBe(true);
+    expect(fastArgs).toEqual([['Ubuntu', 'Running']]);
+  });
+
+  it('wsl con runtime scelto -> sonda completa (PATH esatto)', async () => {
+    const seen: { lastStart?: EnvTarget } = {};
+    const gw = fakeGateway(seen);
+    let full = 0;
+    let fast = 0;
+    gw.probeWsl = async (d) => { full++; return probeWsl(d); };
+    gw.probeWslFast = async (d) => { fast++; return probeWsl(d); };
+    const service = new EnvironmentService(gw, new MemorySettingsStorage(), new NpmRegistryClient(async () => { throw new Error("no-net"); }));
+    const e = row({
+      kind: 'wsl', distro: 'Ubuntu', id: 'wsl:Ubuntu', probe: null,
+      settings: { port: 3100, extraArgs: [], workspace: null, desiredVersion: null, nodeRuntime: '/home/u/.nvm/x/bin' },
+    });
+    await service.enrichRow(e);
+    expect(full).toBe(1);
+    expect(fast).toBe(0);
+  });
+
+  it('errore sonda -> probe scollegata senza throw', async () => {
+    const seen: { lastStart?: EnvTarget } = {};
+    const gw = fakeGateway(seen);
+    gw.probeWslFast = async () => { throw new Error('distro spenta'); };
+    const service = new EnvironmentService(gw, new MemorySettingsStorage(), new NpmRegistryClient(async () => { throw new Error("no-net"); }));
+    const probe = await service.enrichRow(row({ kind: 'wsl', distro: 'U', id: 'wsl:U', probe: null }));
+    expect(probe.installed).toBe(false);
+    expect(probe.error).toContain('distro spenta');
+  });
+});
+
+describe('staleProbeFor', () => {
+  const cached = { name: 'U', state: 'Running', home: '/home/u', hasBun: true, hasNpm: false, dshNativePath: '/home/u/.bun/bin/dsh', dshVersion: '1.2.3' };
+  it('senza cache -> null (riga in attesa)', () => {
+    expect(staleProbeFor('U', undefined, [])).toBeNull();
+  });
+  it('con cache e senza runtime scelto -> probe provvisoria', () => {
+    const p = staleProbeFor('U', cached, [])!;
+    expect(p.installed).toBe(true);
+    expect(p.version).toBe('1.2.3');
+    expect(p.hasBun).toBe(true);
+  });
+  it('con runtime scelto -> null (va riverificata)', () => {
+    const current = [row({ id: 'wsl:U', kind: 'wsl', settings: { port: 3100, extraArgs: [], workspace: null, desiredVersion: null, nodeRuntime: '/x/bin' } })];
+    expect(staleProbeFor('U', cached, current)).toBeNull();
+  });
+  it('cache senza versione -> non installata ma toolchain nota', () => {
+    const p = staleProbeFor('U', { ...cached, dshVersion: null, dshNativePath: null }, [])!;
+    expect(p.installed).toBe(false);
+    expect(p.hasBun).toBe(true);
+  });
+});
 describe('EnvironmentService.refreshRunningStates', () => {
   it('aggiorna i flag e salta le righe busy', async () => {
     const { service } = svc({ portsOpen: [3080] });
@@ -140,6 +255,44 @@ describe('EnvironmentService.stopEnvironment / loadRegistry', () => {
     const out = await service.loadRegistry();
     expect(out.registry).toBeNull();
     expect(out.error).toContain('no-net');
+  });
+  it('loadRegistry salva in cache e la riusa quando la rete manca', async () => {
+    const storage = new MemorySettingsStorage();
+    const fetchOk = async () => ({
+      ok: true,
+      json: async () => ({ 'dist-tags': { latest: '9.9.9' }, versions: { '9.9.9': {} } }),
+    });
+    const online = new EnvironmentService(
+      fakeGateway({}, {}),
+      storage,
+      new NpmRegistryClient(fetchOk as unknown as typeof fetch),
+    );
+    const first = await online.loadRegistry();
+    expect(first.registry?.latest).toBe('9.9.9');
+    expect(first.stale).toBeUndefined();
+    // Rete caduta: stesso storage -> registry dalla cache, nessuno errore.
+    const offline = new EnvironmentService(
+      fakeGateway({}, {}),
+      storage,
+      new NpmRegistryClient(async () => { throw new Error('no-net'); }),
+    );
+    const second = await offline.loadRegistry();
+    expect(second.registry?.latest).toBe('9.9.9');
+    expect(second.error).toBeNull();
+    expect(second.stale).toBe(true);
+  });
+  it('loadRegistry con rete lenta non aspetta oltre il timeout', async () => {
+    const hanging = new Promise<never>(() => undefined);
+    const service = new EnvironmentService(
+      fakeGateway({}, {}),
+      new MemorySettingsStorage(),
+      new NpmRegistryClient((() => hanging) as unknown as typeof fetch),
+    );
+    const t0 = Date.now();
+    const out = await service.loadRegistry();
+    const elapsed = Date.now() - t0;
+    expect(out.registry).toBeNull();
+    expect(elapsed).toBeLessThan(15000);
   });
 });
 

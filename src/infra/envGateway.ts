@@ -3,6 +3,7 @@
 // implementazione di produzione invoca i comandi Tauri. Nei test si inietta un fake.
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  BootScan,
   EnvProbe,
   EnvTarget,
   LayoutInput,
@@ -20,6 +21,11 @@ export interface EnvGateway {
   detectWindows(): Promise<EnvProbe>;
   /** Elenca le distro WSL disponibili. */
   listWslDistros(): Promise<WslDistro[]>;
+  /** Avvio rapido: elenco distro + cache per la prima pittura (zero sonde
+   *  pesanti: le distro fredde non vengono toccate). */
+  scanBoot(): Promise<BootScan>;
+  /** Sonda WSL veloce a singolo spawn (avvio + refresh periodico). */
+  probeWslFast(distro: string, state?: string | null): Promise<EnvProbe>;
   /** Verifica dsh dentro una specifica distro WSL (runtime scelto o null). */
   probeWsl(distro: string, nodeRuntime?: string | null): Promise<EnvProbe>;
   /** Runtime Node disponibili nella distro (nvm decrescenti + sistema). */
@@ -54,6 +60,12 @@ export class TauriEnvGateway implements EnvGateway {
   }
   listWslDistros(): Promise<WslDistro[]> {
     return this.invokeFn<WslDistro[]>("list_wsl_distros");
+  }
+  scanBoot(): Promise<BootScan> {
+    return this.invokeFn<BootScan>("scan_boot");
+  }
+  probeWslFast(distro: string, state?: string | null): Promise<EnvProbe> {
+    return this.invokeFn<EnvProbe>("probe_wsl_fast", { distro, wslState: state ?? null });
   }
   probeWsl(distro: string, nodeRuntime?: string | null): Promise<EnvProbe> {
     return this.invokeFn<EnvProbe>("probe_wsl", { distro, nodeRuntime: nodeRuntime ?? null });

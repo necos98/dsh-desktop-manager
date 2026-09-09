@@ -8,6 +8,7 @@ import {
   envById,
   guiUrl,
   isUpdateAvailable,
+  markRowProbed,
   pruneEnvs,
   runningEnvIds,
   showTabEnv,
@@ -174,7 +175,8 @@ describe('badgeStatus', () => {
     const reg = registry('2.0.0');
     expect(badgeStatus(row({ running: true, settings: { port: 1, extraArgs: [], workspace: null, desiredVersion: null } }), reg).cls).toBe('ok');
     expect(badgeStatus(row({ busy: true }), reg).cls).toBe('busy');
-    expect(badgeStatus(row({ probe: null }), reg)).toEqual({ text: 'Non installato', cls: 'warn' });
+    expect(badgeStatus(row({ probe: null }), reg)).toEqual({ text: 'Rilevamento…', cls: 'busy' });
+    expect(badgeStatus(row({ probe: { kind: 'w', name: 'w', installed: false } }), reg)).toEqual({ text: 'Non installato', cls: 'warn' });
     expect(badgeStatus(row({ probe: { kind: 'w', name: 'w', installed: true, version: '1.0.0' } }), reg)).toMatchObject({ cls: 'warn' });
     expect(badgeStatus(row({ probe: { kind: 'w', name: 'w', installed: true, version: '2.0.0' } }), reg)).toMatchObject({ text: 'v2.0.0 (reinstallabile)', cls: 'idle' });
   });
@@ -198,6 +200,21 @@ describe('upsertEnv / pruneEnvs', () => {
   it('prune rimuove gli id scomparsi', () => {
     const envs = [row({ id: 'windows' }), row({ id: 'wsl:Old', kind: 'wsl' })];
     expect(pruneEnvs(envs, new Set(['windows']))).toHaveLength(1);
+  });
+  it('markRowProbed aggiorna probe/wslState senza toccare settings/running', () => {
+    const s = { port: 9999, extraArgs: [] as string[], workspace: null, desiredVersion: null };
+    const envs = [row({ id: 'wsl:U', kind: 'wsl', running: true, probe: null, settings: s })];
+    const probe = { kind: 'wsl', name: 'U', installed: true, version: '1.0.0' };
+    const next = markRowProbed(envs, 'wsl:U', probe, 'Running');
+    expect(next[0].probe?.version).toBe('1.0.0');
+    expect(next[0].wslState).toBe('Running');
+    expect(next[0].settings.port).toBe(9999);
+    expect(next[0].running).toBe(true);
+    expect(next).not.toBe(envs);
+  });
+  it('markRowProbed su id assente non tocca nulla', () => {
+    const envs = [row({ id: 'windows' })];
+    expect(markRowProbed(envs, 'wsl:Nope', null)).toHaveLength(1);
   });
 });
 

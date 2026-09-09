@@ -39,6 +39,29 @@ export class NpmRegistryClient {
     const json = (await res.json()) as RegistryPayload;
     return parseRegistryPayload(json);
   }
+
+  /** Come `fetchRegistry` ma con timeout: l'avvio non aspetta mai la rete
+   *  oltre `timeoutMs` (AbortController; allo scadere lancia un Error con
+   *  causa "timeout"). Il fetch iniettato dei test che ignora il segnale
+   *  resta valido: la corsa usa Promise.race, non dipende dal segnale. */
+  async fetchRegistryWithTimeout(timeoutMs: number): Promise<RegistryData> {
+    const f = this.fetchFn ?? globalThis.fetch;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(new Error("timeout")), timeoutMs);
+    try {
+      const res = await Promise.race([
+        f(REGISTRY_URL, { headers: { accept: "application/json" }, signal: ctrl.signal }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`Registry npm: timeout dopo ${timeoutMs}ms`)), timeoutMs),
+        ),
+      ]);
+      if (!res.ok) throw new Error("Registry npm: HTTP " + res.status);
+      const json = (await res.json()) as RegistryPayload;
+      return parseRegistryPayload(json);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 }
 
 const shared = new NpmRegistryClient();
