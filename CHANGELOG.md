@@ -6,9 +6,17 @@ pubblicato come Release scaricabile dalla Action `Release`.
 
 ## [Unreleased]
 
+### Added
+
+- Avvio veloce: comando `scan_boot` (elenco distro + cache toolchain/dsh per distro) e sonda WSL veloce a singolo spawn (HOME e `command -v dsh/npm` in un unico `bash -c`), cosi la finestra e interattiva subito.
+- Prima pittura progressiva: le righe note appaiono subito e la sonda completa arricchisce versione/stato in background (`staleProbeFor` nel frontend, gemella Rust `stale_probe_for`).
+- Registry npm cachato (TTL 6 ore) con fetch a timeout: l'avvio non aspetta mai la rete.
+- Strumentazione cold-boot: `BOOT <fase> +<ms>` lato frontend e log di fase lato Rust, per misurare le regressioni di avvio.
+
 ### Changed
 
 - Rimosso ogni supporto bun: toolchain, installer e percorsi `~/.bun`; dsh si installa e si aggiorna solo con npm.
+- Scansione del PATH condivisa (snapshot con TTL) fra i rilevamenti: una sola passata per finestra invece di una per sonda; controllo aggiornamenti rinviato a dopo la prima pittura.
 
 ## [0.4.0] - 2026-09-08
 
