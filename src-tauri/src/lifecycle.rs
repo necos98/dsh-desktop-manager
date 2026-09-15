@@ -11,13 +11,12 @@ use crate::detect::{
     wsl_run_native_with_path, wsl_tool_path, wsl_tool_path_with, NativePath,
 };
 use crate::model::{EnvTarget, WslDiag};
-use crate::proc::{find_free_port_inner, home_dir, CommandRunner, FsAccess, PortProber};
+use crate::proc::{find_free_port_inner, home_dir, windows_launch, CommandRunner, FsAccess, PortProber};
 use crate::util::{extract_auth_url, stamp_compact};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub const UPDATE_TIMEOUT: Duration = Duration::from_secs(600);
 const START_POLL: Duration = Duration::from_secs(60);
 const AUTH_WAIT: Duration = Duration::from_secs(30);
@@ -39,13 +38,17 @@ pub struct SystemSpawner;
 impl ProcessSpawner for SystemSpawner {
     fn spawn_windows_detached(&self, exe: &str, args: &[&str], workdir: &PathBuf, log_path: &PathBuf) -> Result<u32, String> {
         let log = std::fs::File::create(log_path).map_err(|e| format!("log: {e}"))?;
-        let mut cmd = Command::new(exe);
-        cmd.args(args)
+        // L'exe puo essere lo shim `.cmd` di npm (`dsh.cmd`): da lanciare via
+        // `cmd /C` (vedi proc::windows_launch), altrimenti lo spawn fallisce.
+        let (launch, prefix) = windows_launch(exe);
+        let mut cmd = Command::new(&launch);
+        cmd.args(prefix)
+            .args(args)
             .current_dir(workdir)
             .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
             .stderr(Stdio::from(log));
         #[cfg(windows)]
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.creation_flags(crate::proc::CREATE_NO_WINDOW);
         let child = cmd.spawn().map_err(|e| format!("spawn {exe}: {e}"))?;
         let pid = child.id();
         drop(child); // il processo continua; lo gestiamo via taskkill sul pid
@@ -72,7 +75,7 @@ impl ProcessSpawner for SystemSpawner {
             .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
             .stderr(Stdio::from(log));
         #[cfg(windows)]
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.creation_flags(crate::proc::CREATE_NO_WINDOW);
         let mut child = cmd.spawn().map_err(|e| format!("spawn wsl dsh: {e}"))?;
         // Non aspettiamo: il server gira detached (setsid). Chiudiamo gli
         // handle senza killare (il figlio e ri-genitorializzato a init).
@@ -1124,6 +1127,34 @@ mod tests {
     struct AcceptAll;
     impl CommandRunner for AcceptAll {
         fn run_capture(&self, _p: &str, _a: &[&str], _t: Duration) -> Result<(i32, String, String), String> { Ok((0, String::new(), String::new())) }
+    }
+
+    /// Live (solo Windows): lo spawn detached di un wrapper `.cmd` passa da
+    /// `cmd /C` e il figlio scrive nel log (caso reale: avvio di `dsh.cmd`,
+    /// shim di npm in `%APPDATA%\Roaming\npm`).
+    #[test]
+    #[cfg(windows)]
+    fn system_spawner_launches_cmd_wrapper_detached() {
+        let dir = std::env::temp_dir().join(format!("dsh spawn test {}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let script = dir.join("wrap.cmd");
+        std::fs::write(&script, "@echo off\r\necho spawned-ok\r\n").expect("script");
+        let log = dir.join("out.log");
+        let pid = SystemSpawner
+            .spawn_windows_detached(&script.to_string_lossy(), &[], &dir, &log)
+            .expect("spawn wrapper");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut content = String::new();
+        while std::time::Instant::now() < deadline {
+            content = std::fs::read_to_string(&log).unwrap_or_default();
+            if content.contains("spawned-ok") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = crate::proc::kill_pid_tree(pid);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(content.contains("spawned-ok"), "log: {content:?}");
     }
 }
 
