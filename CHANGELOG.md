@@ -6,6 +6,8 @@ pubblicato come Release scaricabile dalla Action `Release`.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-15
+
 ### Fixed
 
 - Un dsh installato via bun (dir `~/.bun/bin` nel PATH) non viene piu rilevato: l'ambiente risulta non installato.
