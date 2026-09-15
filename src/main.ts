@@ -838,13 +838,13 @@ function renderDetail(): void {
   sec1.appendChild(fmtRow("Versione installata", p?.installed ? p?.version : null, true));
   sec1.appendChild(fmtRow("Eseguibile", p?.executable, true));
   sec1.appendChild(fmtRow("DSH_HOME", p?.dshHome, true));
-  // Toolchain native (nelle distro WSL l'interop /mnt/* e ignorata dal
-  // backend): l'utente deve installarle da solo — qui solo avviso.
+  // Toolchain nativa (nelle distro WSL l'interop /mnt/* e ignorata dal
+  // backend): l'utente deve installarla da solo — qui solo avviso.
   const toolchainLine =
-    p?.hasBun === null || p?.hasBun === undefined
+    p?.hasNpm === null || p?.hasNpm === undefined
       ? "—"
-      : `${p.hasBun ? "bun ✓" : "bun ✗"} · ${p.hasNpm ? "npm ✓" : "npm ✗"}${e.kind === "wsl" ? " (nativi)" : ""}`;
-  sec1.appendChild(fmtRow("Toolchain (bun/npm)", p ? toolchainLine : null, true));
+      : `npm ${p.hasNpm ? "✓" : "✗"}${e.kind === "wsl" ? " (nativi)" : ""}`;
+  sec1.appendChild(fmtRow("Toolchain (npm)", p ? toolchainLine : null, true));
   const toolchainMsg = domainToolchainWarning(e);
   if (toolchainMsg) {
     const warn = document.createElement("div");
@@ -1076,8 +1076,8 @@ function renderDetail(): void {
     hint.className = "hint";
     hint.textContent =
       e.kind === "windows"
-        ? "dsh non trovato su Windows. Installa con il pulsante qui sopra (richiede bun o npm installati da te), oppure manualmente: bun add -g @deepseek-ai/dsh"
-        : `dsh nativo non trovato nella distro WSL "${e.name}" (eventuali copie Windows via interop vengono ignorate). Installalo con il pulsante qui sopra (richiede bun o npm nativi installati da te dentro la distro), oppure manualmente via terminale WSL.`;
+        ? "dsh non trovato su Windows. Installa con il pulsante qui sopra (richiede npm/Node installati da te), oppure manualmente: npm install -g @deepseek-ai/dsh"
+        : `dsh nativo non trovato nella distro WSL "${e.name}" (eventuali copie Windows via interop vengono ignorate). Installalo con il pulsante qui sopra (richiede npm/Node nativi installati da te dentro la distro), oppure manualmente via terminale WSL.`;
     wrap.appendChild(hint);
   }
 
@@ -1146,7 +1146,7 @@ function renderWslDiagSection(e: EnvRow): HTMLElement {
     const hint = document.createElement("div");
     hint.className = "hint";
     hint.textContent =
-      "Se l'avvio fallisce, premi «🩺 Diagnostica WSL»: controlla in sequenza distro, dsh nativo, toolchain native bun/npm, porte e log (l'interop Windows /mnt/* viene ignorata).";
+      "Se l'avvio fallisce, premi «🩺 Diagnostica WSL»: controlla in sequenza distro, dsh nativo, npm nativo della distro, porte e log (l'interop Windows /mnt/* viene ignorata).";
     sec.appendChild(hint);
     return sec;
   }
@@ -1169,17 +1169,17 @@ function renderWslDiagSection(e: EnvRow): HTMLElement {
   const mark = (ok: boolean | null | undefined): string => (ok === true ? "✓" : ok === false ? "✗" : "?");
   sec.appendChild(fmtRow("Distro (stato)", `${d.distro} (${d.state ?? "sconosciuto"})`, true));
   sec.appendChild(fmtRow("dsh", d.dshInstalled ? `installato${d.dshVersion ? ` (v${d.dshVersion})` : ""}` : "non trovato", true));
-  sec.appendChild(fmtRow("Toolchain nativa", `bun ${mark(d.hasBun)} · npm ${mark(d.hasNpm)}`, true));
+  sec.appendChild(fmtRow("Toolchain nativa", `npm ${mark(d.hasNpm)}`, true));
   const portLine =
     `nella distro: ${d.portOpenInDistro === true ? "aperta ✓" : d.portOpenInDistro === false ? "chiusa ✗" : "non verificata ?"} · ` +
     `da Windows: ${d.portOpenFromWindows ? "aperta ✓" : "chiusa ✗"} (porta ${e.settings.port})`;
   sec.appendChild(fmtRow("Porta", portLine));
-  if (!d.hasBun && !d.hasNpm) {
+  if (!d.hasNpm) {
     const warn = document.createElement("div");
     warn.className = "warn-box";
     warn.textContent =
-      `Nella distro "${d.distro}" mancano sia bun che npm nativi (eventuali copie Windows via interop vengono ignorate): installa prima una toolchain nativa ` +
-      `(es. \`curl -fsSL https://bun.sh/install | bash\` oppure \`sudo apt install nodejs npm\`), poi installa dsh. ` +
+      `Nella distro "${d.distro}" manca npm nativo (eventuali copie Windows via interop vengono ignorate): installa prima Node/npm ` +
+      `(es. \`sudo apt install nodejs npm\`), poi installa dsh. ` +
       `Il manager non installa toolchain da solo.`;
     sec.appendChild(warn);
   }

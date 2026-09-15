@@ -81,7 +81,6 @@ pub fn detect_windows_with_path(
         executable: None,
         dsh_home: std::env::var("DSH_HOME").ok(),
         error: None,
-        has_bun: None,
         has_npm: None,
     };
 
@@ -89,9 +88,8 @@ pub fn detect_windows_with_path(
     let mut exe: Option<PathBuf> = None;
 
     if let Some(home) = home.as_ref() {
-        // Versione autorevole dal package.json dell'installazione globale
+        // Versione autorevole dal package.json dell'installazione globale npm
         let pkg_candidates = [
-            home.join(".bun").join("install").join("global").join("node_modules").join("@deepseek-ai").join("dsh").join("package.json"),
             home.join("AppData").join("Roaming").join("npm").join("node_modules").join("@deepseek-ai").join("dsh").join("package.json"),
         ];
         for p in pkg_candidates {
@@ -101,8 +99,6 @@ pub fn detect_windows_with_path(
             }
         }
         let exe_candidates = [
-            home.join(".bun").join("bin").join("dsh.exe"),
-            home.join(".bun").join("bin").join("dsh"),
             home.join("AppData").join("Roaming").join("npm").join("dsh.cmd"),
             home.join("AppData").join("Roaming").join("npm").join("dsh"),
         ];
@@ -136,17 +132,15 @@ pub fn detect_windows_with_path(
     probe.version = version;
     probe.executable = exe.as_ref().map(|p| p.to_string_lossy().to_string());
     probe.installed = probe.version.is_some() || probe.executable.is_some();
-    let (has_bun, has_npm) = windows_toolchains(fs, home.as_ref(), path);
-    probe.has_bun = Some(has_bun);
-    probe.has_npm = Some(has_npm);
+    probe.has_npm = Some(windows_has_npm(fs, home.as_ref(), path));
     probe
 }
 
-/// Toolchain su Windows: bun e npm devono essere installati dall'utente
-/// (il manager non li installa mai). Rilevati via filesystem (percorsi
-/// noti) + UNA scansione PATH condivisa (snapshot), senza spawnare processi
-/// (veloce e testabile).
-fn windows_toolchains(fs: &dyn FsAccess, home: Option<&PathBuf>, path: &PathSnapshot) -> (bool, bool) {
+/// Toolchain su Windows: npm deve essere installato dall'utente (il manager
+/// non lo installa mai). Rilevato via filesystem (percorsi noti) + UNA
+/// scansione PATH condivisa (snapshot), senza spawnare processi (veloce e
+/// testabile).
+fn windows_has_npm(fs: &dyn FsAccess, home: Option<&PathBuf>, path: &PathSnapshot) -> bool {
     fn found(fs: &dyn FsAccess, home_rel: Option<PathBuf>, path: &PathSnapshot, path_names: &[&str]) -> bool {
         if let Some(p) = home_rel {
             if fs.path_exists(&p) {
@@ -156,11 +150,8 @@ fn windows_toolchains(fs: &dyn FsAccess, home: Option<&PathBuf>, path: &PathSnap
         path.find(fs, path_names).is_some()
     }
     // Percorsi noti sotto home, uniti in un'unica passata fs per toolchain.
-    let bun_home = home_candidates_present(fs, home, &[&["bun", "bin", "bun.exe"], &[".bun", "bin", "bun.exe"]]);
     let npm_home = home_candidates_present(fs, home, &[&["AppData", "Roaming", "npm", "npm.cmd"]]);
-    let has_bun = bun_home || found(fs, None, path, &["bun.exe", "bun"]);
-    let has_npm = npm_home || found(fs, None, path, &["npm.cmd", "npm"]);
-    (has_bun, has_npm)
+    npm_home || found(fs, None, path, &["npm.cmd", "npm"])
 }
 
 /// True se uno dei percorsi home-rel esiste (UNA passata fs per lista).
@@ -194,7 +185,7 @@ pub fn wsl_args_after(distro: &str) -> Vec<String> {
 
 /// PATH nativo fisso per i comandi WSL (passato via `env`, binario esterno:
 /// niente shell, niente espansione). `home` e risolto da Rust via printenv
-/// (vedi `wsl_home_dir`), non dalla shell. Copre dir di sistema + bun + le
+/// (vedi `wsl_home_dir`), non dalla shell. Copre dir di sistema + le
 /// directory utente dei version manager (nvm/fnm/asdf) e affini: l'utente
 /// non deve fare symlink ne toccare il PATH, funziona cosi com'e.
 /// Mai /mnt/* (l'isolamento resta: solo percorsi Linux, mai interop).
@@ -203,7 +194,7 @@ pub fn wsl_native_path(home: &str) -> String {
     // fnm/asdf: symlinkmultis/+shims. local/npm-global: installazioni utente.
     // volta: ~/.volta/bin + shim. Ordine: version manager prima di sistema.
     format!(
-        "{home}/.bun/bin:{home}/.nvm/versions/node/current/bin:{home}/.nvm/current/bin:{home}/.fnm/current/bin:{home}/.asdf/shims:{home}/.asdf/bin:{home}/.volta/bin:{home}/.local/bin:{home}/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        "{home}/.nvm/versions/node/current/bin:{home}/.nvm/current/bin:{home}/.fnm/current/bin:{home}/.asdf/shims:{home}/.asdf/bin:{home}/.volta/bin:{home}/.local/bin:{home}/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     )
 }
 
@@ -226,8 +217,8 @@ pub fn wsl_nvm_default_alias(runner: &dyn CommandRunner, distro: &str, home: &st
     }
 }
 
-/// Elenca i runtime Node della distro: versioni nvm (con flag default),
-/// node di sistema (se ha `node` nativo), bun (include runtime JS compat).
+/// Elenca i runtime Node della distro: versioni nvm (con flag default)
+/// e node di sistema (se ha `node` nativo).
 /// Comandi atomici; mai un Err lanciato (lista vuota se nulla trovato).
 /// Pura rispetto a CommandRunner: testabile con fake.
 pub fn list_node_runtimes_with(runner: &dyn CommandRunner, distro: &str) -> Vec<crate::model::NodeRuntime> {
@@ -254,7 +245,7 @@ pub fn list_node_runtimes_with(runner: &dyn CommandRunner, distro: &str) -> Vec<
         });
     }
     // Node di sistema (PATH solo-sistema, fuori version manager).
-    if let NativePath::Native(p) = wsl_system_node(runner, distro, &home) {
+    if let NativePath::Native(p) = wsl_system_node(runner, distro) {
         let node_version = wsl_node_version_for_bin(runner, distro, &home, &p);
         out.push(crate::model::NodeRuntime {
             id: parent_dir(&p),
@@ -316,12 +307,11 @@ pub fn wsl_system_path() -> String {
 
 /// Node di sistema: `node` risolto col PATH solo-sistema. Ok(Native) con
 /// percorso, Ok(Missing/Interop) altrimenti. Pura su CommandRunner.
-fn wsl_system_node(runner: &dyn CommandRunner, distro: &str, home: &str) -> NativePath {
+fn wsl_system_node(runner: &dyn CommandRunner, distro: &str) -> NativePath {
     let path = wsl_system_path();
     let mut full: Vec<String> = wsl_args_after(distro);
     full.push("env".into());
     full.push(format!("PATH={path}"));
-    full.push(format!("BUN_INSTALL={home}/.bun"));
     full.push("bash".into());
     full.push("-c".into());
     full.push("command -v node".to_string());
@@ -395,7 +385,7 @@ pub fn wsl_run_native(
     args: &[&str],
     timeout: Duration,
 ) -> Result<(i32, String, String), String> {
-    wsl_run_native_with_path(runner, distro, home, &wsl_native_path(home), bin, args, timeout)
+    wsl_run_native_with_path(runner, distro, &wsl_native_path(home), bin, args, timeout)
 }
 
 /// Come `wsl_run_native` ma con PATH esplicito (es. dir nvm che contiene il
@@ -403,7 +393,6 @@ pub fn wsl_run_native(
 pub fn wsl_run_native_with_path(
     runner: &dyn CommandRunner,
     distro: &str,
-    home: &str,
     path: &str,
     bin: &str,
     args: &[&str],
@@ -412,7 +401,6 @@ pub fn wsl_run_native_with_path(
     let mut full: Vec<String> = wsl_args_after(distro);
     full.push("env".into());
     full.push(format!("PATH={path}"));
-    full.push(format!("BUN_INSTALL={home}/.bun"));
     full.push(bin.to_string());
     full.extend(args.iter().map(|s| s.to_string()));
     let arg_refs: Vec<&str> = full.iter().map(|s| s.as_str()).collect();
@@ -486,7 +474,7 @@ pub fn wsl_tool_path_with(
             ));
         }
         let path = format!("{dir}:{base}");
-        match wsl_which_in(runner, distro, &path, home, bin) {
+        match wsl_which_in(runner, distro, &path, bin) {
             Ok(NativePath::Native(p)) => return Ok((NativePath::Native(p), path)),
             Ok(NativePath::Interop(p)) => return Ok((NativePath::Interop(p), path)),
             _ => {
@@ -496,7 +484,7 @@ pub fn wsl_tool_path_with(
             }
         }
     }
-    if let Ok(found) = wsl_which_in(runner, distro, &base, home, bin) {
+    if let Ok(found) = wsl_which_in(runner, distro, &base, bin) {
         if !matches!(found, NativePath::Missing) {
             return Ok((found, base));
         }
@@ -506,7 +494,7 @@ pub fn wsl_tool_path_with(
     dirs.sort_by(|a, b| cmp_semver_desc(&nvm_version_of(a), &nvm_version_of(b)));
     for dir in dirs {
         let path = format!("{dir}:{base}");
-        if let Ok(found) = wsl_which_in(runner, distro, &path, home, bin) {
+        if let Ok(found) = wsl_which_in(runner, distro, &path, bin) {
             if !matches!(found, NativePath::Missing) {
                 return Ok((found, path));
             }
@@ -528,13 +516,11 @@ fn wsl_which_in(
     runner: &dyn CommandRunner,
     distro: &str,
     path: &str,
-    home: &str,
     bin: &str,
 ) -> Result<NativePath, String> {
     let mut full: Vec<String> = wsl_args_after(distro);
     full.push("env".into());
     full.push(format!("PATH={path}"));
-    full.push(format!("BUN_INSTALL={home}/.bun"));
     full.push("bash".into());
     full.push("-c".into());
     full.push(format!("command -v {bin}"));
@@ -569,28 +555,26 @@ pub struct CachedDistro {
     pub name: String,
     pub state: String,
     pub home: String,
-    pub has_bun: bool,
     pub has_npm: bool,
     pub dsh_native_path: Option<String>,
     pub dsh_version: Option<String>,
 }
 
 /// Argv (dopo `--`) della sonda veloce a singolo spawn: `env PATH=<nativo
-/// minimale> bash -c 'SCRIPT'` dove SCRIPT stampa 5 righe etichettate
-/// (HOME, DSH, BUN, NPM + sentinella di fine). `;` e sintassi bash interna
+/// minimale> bash -c 'SCRIPT'` dove SCRIPT stampa 4 righe etichettate
+/// (HOME, DSH, NPM + sentinella di fine). `;` e sintassi bash interna
 /// (verificato live come sicuro); niente `$` (niente espansione: `command -v`
 /// stampa percorsi assoluti), niente virgolette, niente `$(…)`.
 ///
-/// Il PATH qui e minimale di proposito (solo dir di sistema + bun): la sonda
-/// veloce NON enumera nvm (`ls` resterebbe un secondo spawn) — le versioni
-/// nvm restano appannaggio della sonda completa in background.
+/// Il PATH qui e quello nativo dei version manager (vedi `wsl_native_path`):
+/// la sonda veloce NON enumera nvm (`ls` resterebbe un secondo spawn) — le
+/// versioni nvm restano appannaggio della sonda completa in background.
 pub fn fast_probe_argv(home: &str) -> Vec<String> {
-    let path = format!("{home}/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-    let script = "echo HOME:$HOME;command -v dsh;echo DSH;command -v bun;echo BUN;command -v npm;echo NPM";
+    let path = wsl_native_path(home);
+    let script = "echo HOME:$HOME;command -v dsh;echo DSH;command -v npm;echo NPM";
     vec![
         "env".to_string(),
         format!("PATH={path}"),
-        format!("BUN_INSTALL={home}/.bun"),
         "bash".to_string(),
         "-c".to_string(),
         script.to_string(),
@@ -603,12 +587,11 @@ pub fn fast_probe_argv(home: &str) -> Vec<String> {
 pub struct FastProbeOutput {
     pub home: Option<String>,
     pub dsh: Option<String>,
-    pub bun: Option<String>,
     pub npm: Option<String>,
 }
 
 /// Smista le righe della sonda veloce: `HOME:<path>` per la prima riga, poi
-/// un percorso per `command -v` seguito dalla sua etichetta (DSH/BUN/NPM).
+/// un percorso per `command -v` seguito dalla sua etichetta (DSH/NPM).
 /// Righe vuote e rumore ignorati; etichette sconosciute ignorate. Puro.
 pub fn parse_fast_probe_output(out: &str) -> FastProbeOutput {
     let mut parsed = FastProbeOutput::default();
@@ -629,9 +612,6 @@ pub fn parse_fast_probe_output(out: &str) -> FastProbeOutput {
             "DSH" => {
                 parsed.dsh = last_path.take();
             }
-            "BUN" => {
-                parsed.bun = last_path.take();
-            }
             "NPM" => {
                 parsed.npm = last_path.take();
             }
@@ -643,16 +623,6 @@ pub fn parse_fast_probe_output(out: &str) -> FastProbeOutput {
         }
     }
     parsed
-}
-
-/// Prefisso ambiente STORICO (non piu usato dai comandi atomici, tenuto per
-/// compatibilita dei test esterni): l'isolamento ora avviene via `env`
-/// (vedi `wsl_run_native`) + classificazione in Rust (`native_or_interop`).
-/// DEPRECATO: non usare per nuovi comandi, non passa il lint anti-simboli.
-/// Solo test (`#[cfg(test)]`): la produzione isola via `env` (vedi `wsl_run_native`).
-#[cfg(test)]
-pub fn wsl_env_prefix() -> String {
-    r#"export PATH=$HOME/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin;export BUN_INSTALL=$HOME/.bun"#.to_string()
 }
 
 /// Lint anti-simboli-shell: NESSUN comando WSL puo contenere `$`, virgolette
@@ -699,7 +669,6 @@ pub fn all_wsl_commands_for_lint(distro: &str) -> Vec<Vec<String>> {
         let mut full = wsl_args_after(distro);
         full.push("env".into());
         full.push(format!("PATH={}", wsl_native_path(home)));
-        full.push(format!("BUN_INSTALL={home}/.bun"));
         full.push(bin.to_string());
         full.extend(args.iter().map(|s| s.to_string()));
         cmds.push(full);
@@ -707,11 +676,10 @@ pub fn all_wsl_commands_for_lint(distro: &str) -> Vec<Vec<String>> {
     push("printenv", &["HOME"]);
     push("bash", &["-c", "command -v dsh"]);
     push("dsh", &["--version"]);
-    push("bash", &["-c", "command -v bun"]);
     push("bash", &["-c", "command -v npm"]);
     push("tail", &["-n", "50", "/tmp/dsh-desktop-manager-3100.log"]);
     push("pkill", &["-f", "dsh.web.--port.3100"]);
-    push("bun", &["add", "-g", "@deepseek-ai/dsh@1.0.0"]);
+    push("npm", &["install", "-g", "@deepseek-ai/dsh@1.0.0"]);
     push("bash", &["-c", "if (exec 3<>/dev/tcp/127.0.0.1/3100) 2>/dev/null;then echo OPEN;else echo CLOSED;fi"]);
     cmds
 }
@@ -751,13 +719,11 @@ pub fn stale_probe_for(
         executable: None,
         dsh_home: None,
         error: None,
-        has_bun: None,
         has_npm: None,
     };
     let Some(c) = cached else {
         return probe;
     };
-    probe.has_bun = Some(c.has_bun);
     probe.has_npm = Some(c.has_npm);
     if node_runtime.is_some() {
         // Runtime scelto esplicitamente: lo stato va riverificato (il mondo
@@ -775,8 +741,8 @@ pub fn stale_probe_for(
 }
 
 /// Sonda WSL veloce in UN solo spawn (avvio + refresh periodico): `printenv
-/// HOME` e `command -v dsh/bun/npm` viaggiano in un unico `bash -c` con
-/// `;`, poi Rust smista le 5 righe di output. La classificazione /mnt/* e
+/// HOME` e `command -v dsh/npm` viaggiano in un unico `bash -c` con
+/// `;`, poi Rust smista le 4 righe di output. La classificazione /mnt/* e
 /// identica alla sonda completa: a parita di mondo, stesso verdetto.
 ///
 /// Risponde alla domanda "dsh c'e e che versione ha", non "con quale PATH
@@ -800,10 +766,9 @@ pub fn probe_wsl_fast_with(
         executable: None,
         dsh_home: None,
         error: None,
-        has_bun: None,
         has_npm: None,
     };
-    // UN solo spawn: HOME + 3 which (PATH fisso via `env`, niente shell
+    // UN solo spawn: HOME + 2 which (PATH fisso via `env`, niente shell
     // oltre al `bash -c` con `;` — `;` e verificato live come sicuro).
     let mut args = wsl_args_after(distro);
     args.extend(fast_probe_argv("_DSH_HOME_SENTINEL_"));
@@ -825,16 +790,14 @@ pub fn probe_wsl_fast_with(
         None => return Err(format!("Distro WSL \"{distro}\" non raggiungibile (HOME illeggibile).")),
     };
     let dsh = parsed.dsh.map(|p| native_or_interop(&p)).unwrap_or(NativePath::Missing);
-    let bun = parsed.bun.map(|p| native_or_interop(&p)).unwrap_or(NativePath::Missing);
     let npm = parsed.npm.map(|p| native_or_interop(&p)).unwrap_or(NativePath::Missing);
-    probe.has_bun = Some(matches!(bun, NativePath::Native(_)));
     probe.has_npm = Some(matches!(npm, NativePath::Native(_)));
     match dsh {
         NativePath::Missing => Ok(probe),
         NativePath::Interop(p) => {
             probe.installed = false;
             probe.error = Some(format!(
-                "dsh trovato solo via interop Windows ({p}): ignorato, i mondi non condividono installazioni. Installa dsh nativo nella distro (con bun o npm della distro)."
+                "dsh trovato solo via interop Windows ({p}): ignorato, i mondi non condividono installazioni. Installa dsh nativo nella distro (con npm della distro)."
             ));
             Ok(probe)
         }
@@ -842,7 +805,7 @@ pub fn probe_wsl_fast_with(
             probe.installed = true;
             probe.executable = Some(format!("dsh nativo ({path})"));
             let native_path = wsl_native_path(&home);
-            match wsl_run_native_with_path(runner, distro, &home, &native_path, "dsh", &["--version"], VERSION_TIMEOUT) {
+            match wsl_run_native_with_path(runner, distro, &native_path, "dsh", &["--version"], VERSION_TIMEOUT) {
                 Ok((code, out, _err)) if code == 0 => {
                     probe.version = first_semver(&out);
                     if probe.version.is_none() {
@@ -871,7 +834,7 @@ pub fn probe_wsl_fast_with(
     }
 }
 /// Probe WSL completa in comandi ATOMICI (niente shell, niente script composto).
-/// Passi: HOME via printenv -> which dsh/bun/npm via `bash -c command -v`
+/// Passi: HOME via printenv -> which dsh/npm via `bash -c command -v`
 /// (UN comando, verificato live) -> classifica /mnt/* in Rust -> se dsh e
 /// nativo, `dsh --version` DIRETTO (argv separati, niente shell).
 /// Isolamento garantito per costruzione: nessun `$`, `;`, virgoletta,
@@ -899,19 +862,16 @@ pub fn probe_wsl_with_runtime(
         executable: None,
         dsh_home: None,
         error: None,
-        has_bun: None,
         has_npm: None,
     };
     // 1) HOME della distro (serve per il PATH nativo via `env`).
     let home = wsl_home_dir(runner, distro)?;
-    // 2) dsh col RUNTIME SCELTO (se presente); bun/npm sempre in automatico
-    //    (toolchain indipendenti: la dir node non deve contenerle).
+    // 2) dsh col RUNTIME SCELTO (se presente); npm sempre in automatico
+    //    (toolchain indipendente: la dir node non deve contenerlo).
     //    Runtime sparito -> Err esplicito (mai fallback silenzioso).
     //    Il PATH per `dsh --version` include la dir che lo contiene.
     let (dsh, dsh_path) = wsl_tool_path_with(runner, distro, &home, "dsh", node_runtime)?;
-    let (bun, _) = wsl_tool_path(runner, distro, &home, "bun")?;
     let (npm, _) = wsl_tool_path(runner, distro, &home, "npm")?;
-    probe.has_bun = Some(matches!(bun, NativePath::Native(_)));
     probe.has_npm = Some(matches!(npm, NativePath::Native(_)));
     match dsh {
         NativePath::Missing => {
@@ -923,7 +883,7 @@ pub fn probe_wsl_with_runtime(
             // -> come non installato, ma la UI spiega perche.
             probe.installed = false;
             probe.error = Some(format!(
-                "dsh trovato solo via interop Windows ({p}): ignorato, i mondi non condividono installazioni. Installa dsh nativo nella distro (con bun o npm della distro)."
+                "dsh trovato solo via interop Windows ({p}): ignorato, i mondi non condividono installazioni. Installa dsh nativo nella distro (con npm della distro)."
             ));
             return Ok(probe);
         }
@@ -931,7 +891,7 @@ pub fn probe_wsl_with_runtime(
             // 3) Versione dal binario NATIVO (stesso PATH che lo ha risolto).
             probe.installed = true;
             probe.executable = Some(format!("dsh nativo ({path})"));
-            match wsl_run_native_with_path(runner, distro, &home, &dsh_path, "dsh", &["--version"], VERSION_TIMEOUT) {
+            match wsl_run_native_with_path(runner, distro, &dsh_path, "dsh", &["--version"], VERSION_TIMEOUT) {
                 Ok((code, out, err)) if code == 0 => {
                     probe.version = first_semver(&out);
                     if probe.version.is_none() {
@@ -994,7 +954,6 @@ mod tests {
     struct FastProbe {
         home: String,
         dsh: Option<String>,
-        bun: Option<String>,
         npm: Option<String>,
         version_out: Option<String>,
         spawns: std::sync::Mutex<usize>,
@@ -1003,8 +962,7 @@ mod tests {
         fn native() -> Self {
             Self {
                 home: "/home/u".into(),
-                dsh: Some("/home/u/.bun/bin/dsh".into()),
-                bun: Some("/home/u/.bun/bin/bun".into()),
+                dsh: Some("/home/u/.local/bin/dsh".into()),
                 npm: None,
                 version_out: Some("dsh version 1.2.3".into()),
                 spawns: std::sync::Mutex::new(0),
@@ -1013,10 +971,9 @@ mod tests {
         fn output(&self) -> String {
             let line = |o: &Option<String>| o.clone().unwrap_or_default();
             format!(
-                "HOME:{}\n{}\nDSH\n{}\nBUN\n{}\nNPM\n",
+                "HOME:{}\n{}\nDSH\n{}\nNPM\n",
                 self.home,
                 line(&self.dsh),
-                line(&self.bun),
                 line(&self.npm),
             )
         }
@@ -1044,7 +1001,6 @@ mod tests {
         assert_eq!(fast.version.as_deref(), Some("1.2.3"));
         assert_eq!(fast.version, full.version);
         assert_eq!(fast.executable, full.executable);
-        assert_eq!(fast.has_bun, full.has_bun);
         assert_eq!(fast.has_npm, full.has_npm);
     }
     #[test]
@@ -1058,11 +1014,9 @@ mod tests {
     fn fast_probe_one_spawn_when_missing() {
         let mut r = FastProbe::native();
         r.dsh = None;
-        r.bun = None;
         r.npm = None;
         let probe = probe_wsl_fast_with(&r, "U", WSL_WARM_TIMEOUT).unwrap();
         assert!(!probe.installed);
-        assert_eq!(probe.has_bun, Some(false));
         assert_eq!(probe.has_npm, Some(false));
         assert_eq!(*r.spawns.lock().unwrap(), 1);
     }
@@ -1079,25 +1033,24 @@ mod tests {
         full.dsh = Some("/mnt/c/Users/x/AppData/Roaming/npm/dsh".into());
         let full_probe = probe_wsl_with(&full, "U").unwrap();
         assert!(!full_probe.installed);
-        assert_eq!(probe.has_bun, full_probe.has_bun);
+        assert_eq!(probe.has_npm, full_probe.has_npm);
     }
     #[test]
     fn fast_probe_home_unreadable_is_error() {
         struct NoHome;
         impl CommandRunner for NoHome {
             fn run_capture(&self, _p: &str, _a: &[&str], _t: Duration) -> Result<(i32, String, String), String> {
-                Ok((0, "DSH\nBUN\nNPM\n".into(), String::new()))
+                Ok((0, "DSH\nNPM\n".into(), String::new()))
             }
         }
         assert!(probe_wsl_fast_with(&NoHome, "Nope", WSL_WARM_TIMEOUT).is_err());
     }
     #[test]
     fn parse_fast_probe_output_splits_rows() {
-        let out = "HOME:/home/u\n/home/u/.bun/bin/dsh\nDSH\n\nBUN\n/usr/bin/npm\nNPM\n";
+        let out = "HOME:/home/u\n/home/u/.local/bin/dsh\nDSH\n\nNPM\n/usr/bin/npm\nNPM\n";
         let p = parse_fast_probe_output(out);
         assert_eq!(p.home.as_deref(), Some("/home/u"));
-        assert_eq!(p.dsh.as_deref(), Some("/home/u/.bun/bin/dsh"));
-        assert_eq!(p.bun, None);
+        assert_eq!(p.dsh.as_deref(), Some("/home/u/.local/bin/dsh"));
         assert_eq!(p.npm.as_deref(), Some("/usr/bin/npm"));
     }
     #[test]
@@ -1112,44 +1065,40 @@ mod tests {
             name: "U".into(),
             state: "Running".into(),
             home: "/home/u".into(),
-            has_bun: true,
             has_npm: false,
-            dsh_native_path: Some("/home/u/.bun/bin/dsh".into()),
+            dsh_native_path: Some("/home/u/.local/bin/dsh".into()),
             dsh_version: Some("1.2.3".into()),
         };
         let probe = stale_probe_for("U", Some(&cached), None);
         assert!(probe.installed);
         assert_eq!(probe.version.as_deref(), Some("1.2.3"));
-        assert_eq!(probe.has_bun, Some(true));
         assert_eq!(probe.has_npm, Some(false));
         // Runtime scelto: niente pittura ottimistica (va riverificato).
         let cautious = stale_probe_for("U", Some(&cached), Some("/home/u/.nvm/x/bin"));
         assert!(!cautious.installed);
-        assert_eq!(cautious.has_bun, Some(true));
+        assert_eq!(cautious.has_npm, Some(false));
         // Senza cache: riga vuota in attesa (mai "Non installato" falso).
         let empty = stale_probe_for("U", None, None);
         assert!(!empty.installed);
         assert!(empty.version.is_none());
-        assert_eq!(empty.has_bun, None);
+        assert_eq!(empty.has_npm, None);
     }
     #[test]
     fn detect_windows_single_pass_path_snapshot() {
-        // PATH finto con dsh + bun + npm: UNA passata li trova tutti.
+        // PATH finto con dsh + npm: UNA passata li trova tutti.
         let dir = PathBuf::from("/tools");
         let mut fs = FakeFs::default();
         fs.files.insert(dir.join("dsh.exe"), String::new());
-        fs.files.insert(dir.join("bun.exe"), String::new());
         fs.files.insert(dir.join("npm.cmd"), String::new());
         let snap = PathSnapshot { entries: vec![dir] };
         let probe = detect_windows_with_path(&FakeRunner::default(), &fs, None, &snap);
         assert!(probe.installed);
         assert!(probe.executable.unwrap().contains("dsh.exe"));
-        assert_eq!(probe.has_bun, Some(true));
         assert_eq!(probe.has_npm, Some(true));
         // Snapshot vuoto: niente PATH reale toccato, tutto mancante.
         let probe2 = detect_windows_with_path(&FakeRunner::default(), &FakeFs::default(), None, &empty_path_snapshot());
         assert!(!probe2.installed);
-        assert_eq!(probe2.has_bun, Some(false));
+        assert_eq!(probe2.has_npm, Some(false));
     }
 
     #[test]
@@ -1166,13 +1115,13 @@ mod tests {
             NativePath::Interop("/mnt/c/Users/x/AppData/Roaming/npm/dsh".into())
         );
         assert_eq!(
-            native_or_interop("/home/u/.bun/bin/dsh\n"),
-            NativePath::Native("/home/u/.bun/bin/dsh".into())
+            native_or_interop("/home/u/.local/bin/dsh\n"),
+            NativePath::Native("/home/u/.local/bin/dsh".into())
         );
         // Solo la prima riga conta (difesa contro output rumorosi).
         assert_eq!(
-            native_or_interop("/home/u/.bun/bin/dsh\n/mnt/c/x\n"),
-            NativePath::Native("/home/u/.bun/bin/dsh".into())
+            native_or_interop("/home/u/.local/bin/dsh\n/mnt/c/x\n"),
+            NativePath::Native("/home/u/.local/bin/dsh".into())
         );
     }
     #[test]
@@ -1292,11 +1241,22 @@ mod tests {
         assert!(!path.contains("/mnt/"));
     }
     #[test]
-    fn wsl_native_path_has_no_mnt() {
+    fn wsl_native_path_starts_with_nvm_current() {
         let p = wsl_native_path("/home/u");
-        assert!(p.starts_with("/home/u/.bun/bin:"));
+        assert!(p.starts_with("/home/u/.nvm/versions/node/current/bin:"));
         assert!(p.contains("/usr/local/bin"));
         assert!(!p.contains("/mnt/"));
+    }
+    #[test]
+    fn fast_probe_argv_is_env_path_plus_bash() {
+        // Isolamento: UN solo `env` (PATH) davanti a `bash -c`, quindi
+        // nessuna variabile ambiente oltre al PATH entra nella distro.
+        let argv = fast_probe_argv("/home/u");
+        assert_eq!(argv[0], "env");
+        assert_eq!(argv[1], format!("PATH={}", wsl_native_path("/home/u")));
+        assert_eq!(argv[2], "bash");
+        assert_eq!(argv[3], "-c");
+        assert_eq!(argv.len(), 5);
     }
     #[test]
     fn no_shell_symbols_in_wsl_commands() {
@@ -1316,7 +1276,6 @@ mod tests {
     struct AtomProbe {
         home: Option<String>,
         dsh: Option<String>,
-        bun: Option<String>,
         npm: Option<String>,
         version: Option<(i32, String, String)>,
     }
@@ -1324,8 +1283,7 @@ mod tests {
         fn native() -> Self {
             Self {
                 home: Some("/home/u".into()),
-                dsh: Some("/home/u/.bun/bin/dsh".into()),
-                bun: Some("/home/u/.bun/bin/bun".into()),
+                dsh: Some("/home/u/.local/bin/dsh".into()),
                 npm: None,
                 version: Some((0, "dsh version 1.2.3".into(), String::new())),
             }
@@ -1342,7 +1300,7 @@ mod tests {
             if a.contains(&"bash") {
                 let cmd = a.iter().find(|x| x.starts_with("command -v")).cloned().unwrap_or_default();
                 let bin = cmd.split_whitespace().last().unwrap_or("");
-                let hit = match bin { "dsh" => &self.dsh, "bun" => &self.bun, "npm" => &self.npm, _ => &None };
+                let hit = match bin { "dsh" => &self.dsh, "npm" => &self.npm, _ => &None };
                 return match hit {
                     Some(p) => Ok((0, format!("{p}\n"), String::new())),
                     None => Ok((1, String::new(), String::new())),
@@ -1364,12 +1322,12 @@ mod tests {
         // --ignored --nocapture`): printenv, which, versione, sonda porta e
         // probe completa sulla distro reale. Verificato su Ubuntu-24.04 col
         // PATH dev pieno di parentesi: zero syntax error, shim /mnt/c
-        // invisibile (dsh/bun/npm -> Missing), sonda CLOSED, probe coerente.
+        // invisibile (dsh/npm -> Missing), sonda CLOSED, probe coerente.
         // Stessi argv di SystemRunner (wsl_args_after + env + binario).
         let r = crate::proc::SystemRunner;
         let home = wsl_home_dir(&r, "Ubuntu-24.04").expect("home live");
         println!("HOME={home:?}");
-        for bin in ["dsh", "bun", "npm"] {
+        for bin in ["dsh", "npm"] {
             let w = wsl_which(&r, "Ubuntu-24.04", &home, bin).expect("which live");
             println!("{bin} -> {w:?}");
         }
@@ -1382,7 +1340,7 @@ mod tests {
         let res = crate::proc::CommandRunner::run_capture(&out, "wsl.exe", &refs, std::time::Duration::from_secs(30)).expect("sonda live");
         println!("PORTA={res:?}");
         let probe = probe_wsl_with(&r, "Ubuntu-24.04").expect("probe live");
-        println!("PROBE installed={} version={:?} bun={:?} npm={:?} err={:?}", probe.installed, probe.version, probe.has_bun, probe.has_npm, probe.error);
+        println!("PROBE installed={} version={:?} npm={:?} err={:?}", probe.installed, probe.version, probe.has_npm, probe.error);
         let rts = list_node_runtimes_with(&r, "Ubuntu-24.04");
         for rt in &rts {
             println!("RUNTIME id={} label={} node={:?} default={} src={}", rt.id, rt.label, rt.node_version, rt.is_default, rt.source);
@@ -1394,25 +1352,12 @@ mod tests {
         }
     }
     #[test]
-    fn wsl_env_prefix_is_fixed_minimal() {
-        // Isolamento mondi con PATH FISSO (niente filtraggio, niente quote):
-        // solo ~/.bun/bin + directory di sistema Linux, mai /mnt/*.
-        let p = wsl_env_prefix();
-        assert!(p.contains("$HOME/.bun/bin"));
-        assert!(p.contains("BUN_INSTALL"));
-        assert!(p.contains("/usr/local/bin"));
-        assert!(!p.contains("/mnt/"));
-        assert!(!p.contains('\''));
-        assert!(!p.contains('"'));
-    }
-    #[test]
     fn probe_interop_only_is_not_installed() {
         // dsh SOLO via interop Windows: mondi separati -> non installato,
         // con spiegazione del percorso condiviso ignorato.
         let mut r = AtomProbe::native();
         r.dsh = Some("/mnt/c/Users/x/AppData/Roaming/npm/dsh".into());
         r.npm = Some("/usr/bin/npm".into());
-        r.bun = None;
         let probe = probe_wsl_with(&r, "U").unwrap();
         assert!(!probe.installed);
         assert!(probe.version.is_none());
@@ -1421,27 +1366,23 @@ mod tests {
         assert!(err.contains("interop"), "{err}");
         // npm nativo resta rilevato: toolchain indipendente da dsh.
         assert_eq!(probe.has_npm, Some(true));
-        assert_eq!(probe.has_bun, Some(false));
     }
     #[test]
     fn probe_native_ok_reports_native_path() {
         let probe = probe_wsl_with(&AtomProbe::native(), "U").unwrap();
         assert!(probe.installed);
         assert_eq!(probe.version.as_deref(), Some("1.2.3"));
-        assert!(probe.executable.unwrap().contains("/home/u/.bun/bin/dsh"));
-        assert_eq!(probe.has_bun, Some(true));
+        assert!(probe.executable.unwrap().contains("/home/u/.local/bin/dsh"));
         assert_eq!(probe.has_npm, Some(false));
     }
     #[test]
     fn probe_toolchain_interop_only_is_missing() {
-        // bun/npm SOLO via interop: ignorati -> entrambi mancanti.
+        // npm SOLO via interop: ignorato -> mancante.
         let mut r = AtomProbe::native();
         r.dsh = None;
-        r.bun = Some("/mnt/c/Program Files/bun/bun.exe".into());
         r.npm = Some("/mnt/c/Program Files/nodejs/npm".into());
         let probe = probe_wsl_with(&r, "U").unwrap();
         assert!(!probe.installed);
-        assert_eq!(probe.has_bun, Some(false));
         assert_eq!(probe.has_npm, Some(false));
     }
     #[test]
@@ -1452,18 +1393,15 @@ mod tests {
         let probe = probe_wsl_with(&r, "U").unwrap();
         assert!(!probe.installed);
         assert_eq!(probe.distro.as_deref(), Some("U"));
-        assert_eq!(probe.has_bun, Some(true));
         assert_eq!(probe.has_npm, Some(false));
     }
     #[test]
-    fn probe_no_toolchain_reports_both_missing() {
+    fn probe_no_toolchain_reports_missing() {
         let mut r = AtomProbe::native();
         r.dsh = None;
-        r.bun = None;
         r.npm = None;
         let probe = probe_wsl_with(&r, "U").unwrap();
         assert!(!probe.installed);
-        assert_eq!(probe.has_bun, Some(false));
         assert_eq!(probe.has_npm, Some(false));
     }
     #[test]
@@ -1496,9 +1434,11 @@ mod tests {
     }
     #[test]
     fn detect_windows_from_fake_package_json() {
+        // Percorsi costruiti con join: stessa forma di `detect_windows_with`
+        // (separatori nativi, altrimenti il fake non li trova su Windows).
         let home = PathBuf::from("/home/u");
-        let pkg = "/home/u/.bun/install/global/node_modules/@deepseek-ai/dsh/package.json";
-        let fs = FakeFs::with(pkg, "{\"version\": \"1.2.3\"}");
+        let pkg = home.join("AppData").join("Roaming").join("npm").join("node_modules").join("@deepseek-ai").join("dsh").join("package.json");
+        let fs = FakeFs::with(&pkg.to_string_lossy(), "{\"version\": \"1.2.3\"}");
         let runner = FakeRunner::default();
         let probe = detect_windows_with(&runner, &fs, Some(home));
         assert!(probe.installed);
@@ -1506,9 +1446,10 @@ mod tests {
     }
     #[test]
     fn detect_windows_falls_back_to_version_flag() {
-        let fs = FakeFs::with("/home/u/.bun/bin/dsh.exe", "");
         let home = PathBuf::from("/home/u");
-        let exe = PathBuf::from("/home/u").join(".bun").join("bin").join("dsh.exe").to_string_lossy().into_owned();
+        let exe = home.join("AppData").join("Roaming").join("npm").join("dsh.cmd");
+        let exe = exe.to_string_lossy().into_owned();
+        let fs = FakeFs::with(&exe, "");
         let runner = FakeRunner::with_output(&exe, &["--version"], 0, "dsh version 2.0.0", "");
         let probe = detect_windows_with(&runner, &fs, Some(home));
         assert!(probe.installed);

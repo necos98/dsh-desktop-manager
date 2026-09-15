@@ -66,7 +66,7 @@ export function isUpdateAvailable(e: EnvRow, registry: RegistryData | null): boo
  *  reinstall (stessa versione) oppure install (dsh assente). Null quando non
  *  c'e una versione desiderata selezionabile (registry non raggiungibile).
  *  Pura: la UI abilita il pulsante per QUALSIASI direzione — il backend
- *  (bun/npm add|install -g con versione pinnata) sovrascrive in ogni caso. */
+ *  (npm install -g con versione pinnata) sovrascrive in ogni caso. */
 export type VersionChange = "install" | "upgrade" | "downgrade" | "reinstall";
 
 export function versionChangeOf(e: EnvRow, registry: RegistryData | null): VersionChange | null {
@@ -97,37 +97,31 @@ export function guiUrl(port: number): string {
   return "http://127.0.0.1:" + port;
 }
 
-/** Stato toolchain di un ambiente: "ok" | "partial" (una sola) | "missing" (nessuna) | "unknown".
- *  Pura: la regola vive qui, la UI mostra solo l'avviso. Nelle distro WSL
- *  i booleani contano SOLO i binari nativi Linux (l'interop /mnt/* viene
- *  ignorata dal backend): il manager non installa mai toolchain — se
- *  mancano entrambe, deve farlo l'utente. */
-export type ToolchainStatus = "ok" | "partial" | "missing" | "unknown";
+/** Stato toolchain di un ambiente: "ok" (npm presente) | "missing" | "unknown".
+ *  Pura: la regola vive qui, la UI mostra solo l'avviso. Nelle distro WSL il
+ *  booleano conta SOLO il binario nativo Linux (l'interop /mnt/* viene
+ *  ignorata dal backend): il manager non installa mai la toolchain — se
+ *  manca npm, deve farlo l'utente. */
+export type ToolchainStatus = "ok" | "missing" | "unknown";
 
 export function toolchainStatus(probe: EnvProbe | null): ToolchainStatus {
-  const bun = probe?.hasBun ?? null;
   const npm = probe?.hasNpm ?? null;
-  if (bun === null && npm === null) return "unknown";
-  if (bun === true || npm === true) {
-    return bun === true && npm === true ? "ok" : "partial";
-  }
-  return "missing";
+  if (npm === null) return "unknown";
+  return npm ? "ok" : "missing";
 }
 
 /** Avviso toolchain da mostrare vicino ai pulsanti Installa/Aggiorna.
- *  Null = nessun avviso (toolchain ok o non verificata). */
+ *  Null = nessun avviso (npm ok o non verificato). */
 export function toolchainWarning(e: EnvRow): string | null {
   const native = e.kind === "wsl" ? " nativi" : "";
   const distro = e.kind === "wsl" ? ` nella distro "${e.distro ?? e.name}"` : " su Windows";
   switch (toolchainStatus(e.probe)) {
     case "missing":
       return (
-        `Attenzione: ne bun ne npm${native} risultano installati${distro} (eventuali copie Windows via interop vengono ignorate: i mondi non condividono installazioni). ` +
-        `Installa prima una toolchain nativa (es. bun da https://bun.sh oppure nodejs/npm della distro), poi installa dsh. ` +
+        `Attenzione: npm${native} non risulta installato${distro} (eventuali copie Windows via interop vengono ignorate: i mondi non condividono installazioni). ` +
+        `Installa prima Node/npm (es. \`sudo apt install nodejs npm\`), poi installa dsh. ` +
         `Il manager non installa toolchain da solo.`
       );
-    case "partial":
-      return null;
     default:
       return null;
   }

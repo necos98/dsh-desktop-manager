@@ -108,25 +108,26 @@ describe('isUpdateAvailable', () => {
 });
 
 describe('toolchainStatus / toolchainWarning', () => {
-  it('missing quando entrambe false (wsl: nativi + interop ignorata)', () => {
-    const e = row({ kind: 'wsl', distro: 'U', id: 'wsl:U', probe: { kind: 'wsl', name: 'U', installed: false, hasBun: false, hasNpm: false } });
+  it('missing quando npm manca (wsl: nativi + interop ignorata)', () => {
+    const e = row({ kind: 'wsl', distro: 'U', id: 'wsl:U', probe: { kind: 'wsl', name: 'U', installed: false, hasNpm: false } });
     expect(toolchainStatus(e.probe)).toBe('missing');
-    expect(toolchainWarning(e)).toContain('bun');
+    expect(toolchainWarning(e)).toContain('npm');
     expect(toolchainWarning(e)).toContain('nativi');
     expect(toolchainWarning(e)).toContain('interop');
     expect(toolchainWarning(e)).toContain('Il manager non installa toolchain');
   });
-  it('partial con una sola toolchain, nessun avviso', () => {
-    const e = row({ probe: { kind: 'wsl', name: 'U', installed: false, hasBun: true, hasNpm: false } });
-    expect(toolchainStatus(e.probe)).toBe('partial');
-    expect(toolchainWarning(e)).toBeNull();
+  it('missing su Windows quando npm manca', () => {
+    const e = row({ probe: { kind: 'windows', name: 'W', installed: false, hasNpm: false } });
+    expect(toolchainStatus(e.probe)).toBe('missing');
+    expect(toolchainWarning(e)).toContain('npm');
+    expect(toolchainWarning(e)).not.toContain('nativi');
   });
   it('unknown quando non verificata', () => {
     expect(toolchainStatus(null)).toBe('unknown');
     expect(toolchainWarning(row({ probe: null }))).toBeNull();
   });
-  it('ok con entrambe presenti', () => {
-    const e = row({ probe: { kind: 'windows', name: 'W', installed: true, hasBun: true, hasNpm: true } });
+  it('ok con npm presente', () => {
+    const e = row({ probe: { kind: 'windows', name: 'W', installed: true, hasNpm: true } });
     expect(toolchainStatus(e.probe)).toBe('ok');
     expect(toolchainWarning(e)).toBeNull();
   });

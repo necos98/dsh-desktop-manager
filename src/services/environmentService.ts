@@ -43,7 +43,6 @@ export function staleProbeFor(
     version: cached.dshVersion ?? null,
     executable: cached.dshNativePath ? `dsh nativo (${cached.dshNativePath})` : null,
     error: null,
-    hasBun: cached.hasBun,
     hasNpm: cached.hasNpm,
   };
 }
@@ -337,7 +336,7 @@ export class EnvironmentService {
   /**
    * Installa dsh alla versione desiderata e rilegge la probe.
    * Vale per QUALSIASI direzione: install, upgrade, downgrade, reinstall —
-   * il backend sovrascrive la versione pinnata con bun/npm (-g) in ogni caso.
+   * il backend sovrascrive la versione pinnata con npm (-g) in ogni caso.
    * Dopo il cambio, se l'ambiente era in esecuzione lo si riavvia
    * (stop+start) cosi la GUI gira davvero sulla nuova versione.
    */

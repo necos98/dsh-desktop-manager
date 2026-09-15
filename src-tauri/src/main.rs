@@ -116,7 +116,6 @@ async fn detect_windows(cache: State<'_, DetectCache>) -> Result<EnvProbe, Strin
         executable: None,
         dsh_home: None,
         error: Some(e),
-        has_bun: None,
         has_npm: None,
     });
     log_boot_phase("detect_windows", t0);
@@ -215,7 +214,6 @@ async fn scan_boot(boot_cache: State<'_, WslBootCache>) -> Result<BootScan, Stri
                             name: d.name.clone(),
                             state: d.state.clone(),
                             home: String::new(),
-                            has_bun: p.has_bun.unwrap_or(false),
                             has_npm: p.has_npm.unwrap_or(false),
                             dsh_native_path: p.executable.as_ref().and_then(|e| {
                                 e.strip_prefix("dsh nativo (")
@@ -309,7 +307,6 @@ async fn diagnose_wsl(distro: String, port: u16, node_runtime: Option<String>) -
             state: None,
             dsh_installed: false,
             dsh_version: None,
-            has_bun: false,
             has_npm: false,
             port_open_in_distro: None,
             port_open_from_windows: false,
@@ -504,13 +501,7 @@ async fn run_update(target: EnvTarget, version: String) -> UpdateResult {
     let _ = kind; // il branch vive in lifecycle::run_update_with
     let result = blocking(move || -> Result<(i32, String), String> {
         let runner = proc::SystemRunner;
-        let (code, output) = run_update_with(
-            &runner,
-            &runner,
-            proc::home_dir(),
-            &target,
-            &version,
-        );
+        let (code, output) = run_update_with(&runner, &target, &version);
         Ok((code, output))
     })
     .await;

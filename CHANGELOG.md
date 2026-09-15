@@ -6,6 +6,10 @@ pubblicato come Release scaricabile dalla Action `Release`.
 
 ## [Unreleased]
 
+### Changed
+
+- Rimosso ogni supporto bun: toolchain, installer e percorsi `~/.bun`; dsh si installa e si aggiorna solo con npm.
+
 ## [0.4.0] - 2026-09-08
 
 ## [0.4.0] - 2026-09-08
