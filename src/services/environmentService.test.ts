@@ -49,9 +49,8 @@ function fakeGateway(service: { lastStart?: EnvTarget }, opts: FakeOpts = {}): E
           name: d.name,
           state: d.state,
           home: '/home/u',
-          hasBun: true,
-          hasNpm: false,
-          dshNativePath: '/home/u/.bun/bin/dsh',
+          hasNpm: true,
+          dshNativePath: '/home/u/.local/bin/dsh',
           dshVersion: '1.0.0',
         })),
       };
@@ -69,7 +68,7 @@ function fakeGateway(service: { lastStart?: EnvTarget }, opts: FakeOpts = {}): E
     openInBrowser: async () => undefined,
     runUpdate: async () => ({ ok: true, exitCode: 0, output: 'ok' }) as UpdateResult,
     readEnvLog: async (target) => [`/tmp/dsh-desktop-manager-${target.port}.log`, 'riga1\nriga2'],
-    diagnoseWsl: async (distro) => ({ distro, dshInstalled: true, dshVersion: '1.0.0', hasBun: true, hasNpm: false, portOpenFromWindows: false, portOpenInDistro: true, logTail: 'tail', state: 'Running', error: null }),
+    diagnoseWsl: async (distro) => ({ distro, dshInstalled: true, dshVersion: '1.0.0', hasNpm: true, portOpenFromWindows: false, portOpenInDistro: true, logTail: 'tail', state: 'Running', error: null }),
     listNodeRuntimes: async () => [{ id: '/home/u/.nvm/versions/node/v24.20.0/bin', label: 'nvm v24.20.0 (default)', nodeVersion: 'v24.20.0', isDefault: true, source: 'nvm' }],
   };
 }
@@ -126,7 +125,7 @@ describe('EnvironmentService.scanBootFast (prima pittura)', () => {
     // La riga usa la cache (versione nota, toolchain dalla cache).
     const wsl = envs.find((e) => e.id === 'wsl:Ubuntu')!;
     expect(wsl.probe?.version).toBe('1.0.0');
-    expect(wsl.probe?.hasBun).toBe(true);
+    expect(wsl.probe?.hasNpm).toBe(true);
   });
 
   it('distro senza cache -> probe null (in attesa, mai "Non installato" falso)', async () => {
@@ -188,7 +187,7 @@ describe('EnvironmentService.enrichRow (arricchimento background)', () => {
 });
 
 describe('staleProbeFor', () => {
-  const cached = { name: 'U', state: 'Running', home: '/home/u', hasBun: true, hasNpm: false, dshNativePath: '/home/u/.bun/bin/dsh', dshVersion: '1.2.3' };
+  const cached = { name: 'U', state: 'Running', home: '/home/u', hasNpm: true, dshNativePath: '/home/u/.local/bin/dsh', dshVersion: '1.2.3' };
   it('senza cache -> null (riga in attesa)', () => {
     expect(staleProbeFor('U', undefined, [])).toBeNull();
   });
@@ -196,7 +195,7 @@ describe('staleProbeFor', () => {
     const p = staleProbeFor('U', cached, [])!;
     expect(p.installed).toBe(true);
     expect(p.version).toBe('1.2.3');
-    expect(p.hasBun).toBe(true);
+    expect(p.hasNpm).toBe(true);
   });
   it('con runtime scelto -> null (va riverificata)', () => {
     const current = [row({ id: 'wsl:U', kind: 'wsl', settings: { port: 3100, extraArgs: [], workspace: null, desiredVersion: null, nodeRuntime: '/x/bin' } })];
@@ -205,7 +204,7 @@ describe('staleProbeFor', () => {
   it('cache senza versione -> non installata ma toolchain nota', () => {
     const p = staleProbeFor('U', { ...cached, dshVersion: null, dshNativePath: null }, [])!;
     expect(p.installed).toBe(false);
-    expect(p.hasBun).toBe(true);
+    expect(p.hasNpm).toBe(true);
   });
 });
 describe('EnvironmentService.refreshRunningStates', () => {

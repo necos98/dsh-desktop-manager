@@ -24,14 +24,14 @@ const AUTH_WAIT: Duration = Duration::from_secs(30);
 
 /// Spawn di processi detached (Windows CREATE_NO_WINDOW / WSL via wsl.exe).
 /// Separato da CommandRunner (che cattura l'output) per ISP.
-/// Lo spawn WSL e ATOMICO: `wsl -d D --cd WS -- env PATH=.. BUN_INSTALL=..
+/// Lo spawn WSL e ATOMICO: `wsl -d D --cd WS -- env PATH=..
 /// setsid nohup BIN ARGS...` (argv separati, niente shell) + log catturato
 /// lato Rust su file Windows (niente redirect shell nella distro).
 /// `path` e il PATH risolto che contiene il binario (nvm versioni comprese),
-/// `home` serve per BUN_INSTALL. Entrambi dalla probe (`wsl_tool_path`).
+/// dalla probe (`wsl_tool_path`).
 pub trait ProcessSpawner: Send + Sync {
     fn spawn_windows_detached(&self, exe: &str, args: &[&str], workdir: &PathBuf, log_path: &PathBuf) -> Result<u32, String>;
-    fn spawn_wsl_detached(&self, runner: &dyn CommandRunner, distro: &str, path: &str, home: &str, ws: &str, bin: &str, args: &[&str], log_path: &PathBuf) -> Result<(), String>;
+    fn spawn_wsl_detached(&self, runner: &dyn CommandRunner, distro: &str, path: &str, ws: &str, bin: &str, args: &[&str], log_path: &PathBuf) -> Result<(), String>;
 }
 
 pub struct SystemSpawner;
@@ -51,7 +51,7 @@ impl ProcessSpawner for SystemSpawner {
         drop(child); // il processo continua; lo gestiamo via taskkill sul pid
         Ok(pid)
     }
-    fn spawn_wsl_detached(&self, _runner: &dyn CommandRunner, distro: &str, path: &str, home: &str, ws: &str, bin: &str, args: &[&str], log_path: &PathBuf) -> Result<(), String> {
+    fn spawn_wsl_detached(&self, _runner: &dyn CommandRunner, distro: &str, path: &str, ws: &str, bin: &str, args: &[&str], log_path: &PathBuf) -> Result<(), String> {
         // wsl.exe --cd <ws> : la distro parte nella workdir (niente `cd`).
         // `nohup` SENZA `setsid` (verificato live): setsid stacca il dsh
         // dalla sessione e il relay wsl chiude i pipe -> log Windows vuoto
@@ -63,7 +63,6 @@ impl ProcessSpawner for SystemSpawner {
         let mut full: Vec<String> = vec!["-d".into(), distro.to_string(), "--cd".into(), ws.to_string(), "--".into()];
         full.push("env".into());
         full.push(format!("PATH={path}"));
-        full.push(format!("BUN_INSTALL={home}/.bun"));
         full.push("nohup".into());
         full.push(bin.to_string());
         full.extend(args.iter().map(|s| s.to_string()));
@@ -244,9 +243,9 @@ pub fn start_windows_with_timeout(
 }
 
 /// Preflight WSL prima di start/update: verifica in UN solo giro che la distro
-/// risponda, che dsh sia installato e che almeno una toolchain (bun o npm)
-/// sia presente. Ritorna Ok(()) oppure un messaggio gia pronto per la UI
-/// (l'utente deve installare dsh/toolchain da solo: il manager non lo fa).
+/// risponda, che dsh sia installato e che npm sia presente.
+/// Ritorna Ok(()) oppure un messaggio gia pronto per la UI
+/// (l'utente deve installare dsh/npm da solo: il manager non lo fa).
 /// `node_runtime`: dir scelta dall'utente (None = automatico). Dietro
 /// CommandRunner: nessun processo reale nei test.
 /// Solo test: la produzione passa il runtime esplicito via `preflight_wsl_with`.
@@ -269,7 +268,7 @@ pub fn preflight_wsl_with(
         if probe.installed {
             // dsh nativo esiste ma non si avvia/stampa versione.
             // La distro risponde: non dire "non raggiungibile" (fuorviante).
-            return Err(format!("dsh nella distro WSL \"{distro}\" e rotto: {err} Installa dsh nativamente nella distro (con bun o npm della distro), non via interop Windows."));
+            return Err(format!("dsh nella distro WSL \"{distro}\" e rotto: {err} Installa dsh nativamente nella distro (con npm della distro), non via interop Windows."));
         }
         if err.contains("interop") || err.contains("mondi non condividono") {
             // dsh esiste SOLO come shim Windows condiviso: la distro risponde,
@@ -279,11 +278,10 @@ pub fn preflight_wsl_with(
         return Err(format!("Distro WSL \"{distro}\" non raggiungibile ({err}). Verifica che WSL sia installato e che la distro esista (`wsl -l -v`)."));
     }
     if need_dsh && !probe.installed {
-        let toolchain_hint = match (probe.has_bun, probe.has_npm) {
-            (Some(false), Some(false)) | (Some(false), None) | (None, Some(false)) => {
-                " Nella distro mancano anche bun e npm: installa prima una toolchain (es. `curl -fsSL https://bun.sh/install | bash`), poi dsh."
-            }
-            _ => " Installa dsh nella distro con il pulsante Installa (richiede bun o npm nella distro).",
+        let toolchain_hint = if probe.has_npm == Some(false) {
+            " Nella distro manca npm: installa Node/npm (es. `sudo apt install nodejs npm`), poi dsh."
+        } else {
+            " Installa dsh nella distro con il pulsante Installa (richiede npm nella distro)."
         };
         return Err(format!("dsh non trovato nella distro WSL \"{distro}\".{toolchain_hint}"));
     }
@@ -324,7 +322,6 @@ pub fn diagnose_wsl_with_runtime(
         state: None,
         dsh_installed: false,
         dsh_version: None,
-        has_bun: false,
         has_npm: false,
         port_open_in_distro: None,
         port_open_from_windows: prober.is_open(port),
@@ -361,7 +358,6 @@ pub fn diagnose_wsl_with_runtime(
         Ok(p) => {
             diag.dsh_installed = p.installed;
             diag.dsh_version = p.version;
-            diag.has_bun = p.has_bun.unwrap_or(false);
             diag.has_npm = p.has_npm.unwrap_or(false);
             if diag.error.is_none() {
                 diag.error = p.error;
@@ -425,7 +421,7 @@ pub fn start_wsl_with_timeout(
         }
         NativePath::Missing => {
             return Err(format!(
-                "dsh nativo assente nella distro WSL \"{distro}\": installalo nella distro con il pulsante Installa (richiede bun o npm nativi della distro)."
+                "dsh nativo assente nella distro WSL \"{distro}\": installalo nella distro con il pulsante Installa (richiede npm nativi della distro)."
             ));
         }
     };
@@ -452,7 +448,7 @@ pub fn start_wsl_with_timeout(
     let log_path = dsh_log_path(t.port);
     // PERCORSO ASSOLUTO (fix probe-vs-start): non `dsh` per nome (lotteria
     // PATH tra versioni), ma il file esatto classificato nativo dalla probe.
-    spawner.spawn_wsl_detached(runner, &distro, &dsh_path, &home, &ws, &dsh_bin, &spawn_refs, &log_path).map_err(|e| {
+    spawner.spawn_wsl_detached(runner, &distro, &dsh_path, &ws, &dsh_bin, &spawn_refs, &log_path).map_err(|e| {
         format!("Avvio nella distro \"{distro}\" fallito ({e}). Apri la Diagnostica WSL dal pannello per il dettaglio passo-passo.")
     })?;
     let reached = crate::proc::poll_port(prober, t.port, poll_max, sleep_ms);
@@ -507,43 +503,26 @@ pub fn stop_wsl_with(runner: &dyn CommandRunner, t: &EnvTarget) -> Result<String
     Ok(format!("Comando di arresto inviato nella distro {distro} (porta {}).", t.port))
 }
 
-/// Installazione Windows (bun add -g, fallback npm install -g) oppure WSL
-/// (bun o npm nella distro). Vale per QUALSIASI direzione (upgrade,
-/// downgrade, reinstall): il package manager sovrascrive la versione pinnata.
-pub fn run_update_with(runner: &dyn CommandRunner, fs: &dyn FsAccess, home: Option<PathBuf>, t: &EnvTarget, version: &str) -> (i32, String) {
+/// Installazione/aggiornamento via npm: su Windows `npm install -g pkg`
+/// (npm dal PATH), nella distro WSL il npm NATIVO della distro. Vale per
+/// QUALSIASI direzione (upgrade, downgrade, reinstall): il package manager
+/// sovrascrive la versione pinnata. Ritorna (exit code, stdout+stderr).
+pub fn run_update_with(runner: &dyn CommandRunner, t: &EnvTarget, version: &str) -> (i32, String) {
     let pkg = format!("@deepseek-ai/dsh@{version}");
     if t.kind == "windows" {
-        // Candidati bun.exe (percorso noto, poi PATH) e npm.cmd (PATH/roaming).
-        let bun_exe = home
-            .as_ref()
-            .map(|h| h.join(".bun").join("bin").join("bun.exe"))
-            .filter(|p| fs.path_exists(p))
-            .map(|p| p.to_string_lossy().to_string());
-        let mut attempts: Vec<(String, Vec<String>)> = Vec::new();
-        match bun_exe {
-            Some(b) => attempts.push((b, vec!["add".into(), "-g".into(), pkg.clone()])),
-            None => attempts.push(("bun".into(), vec!["add".into(), "-g".into(), pkg.clone()])),
-        }
-        attempts.push(("npm".into(), vec!["install".into(), "-g".into(), pkg.clone()]));
-        // Prova in ordine; se bun fallisce (assente o errore) si passa a
-        // npm come ultima spiaggia. L'errore riportato e quello dell'ultimo
-        // tentativo (il piu pertinente per l'utente).
-        let mut last = (-1, "nessun installer riuscito".to_string());
-        for (prog, args) in &attempts {
-            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            match runner.run_capture(prog, &arg_refs, UPDATE_TIMEOUT) {
-                Ok((0, out, err)) => return (0, format!("{out}\n{err}")),
-                Ok((code, out, err)) => last = (code, format!("{out}\n{err}")),
-                Err(e) => last = (-1, e),
-            }
-        }
-        return last;
+        // Unico installer: npm. L'errore riportato e quello di npm (il piu
+        // pertinente per l'utente: il manager non tenta altre toolchain).
+        let args = ["install", "-g", pkg.as_str()];
+        return match runner.run_capture("npm", &args, UPDATE_TIMEOUT) {
+            Ok((code, out, err)) => (code, format!("{out}\n{err}")),
+            Err(e) => (-1, e),
+        };
     } else {
         match t.distro.clone() {
             Some(d) => {
-                // Fail-fast: senza toolchain l'installazione fallirebbe con un
+                // Fail-fast: senza npm l'installazione fallirebbe con un
                 // errore oscuro dopo minuti — meglio dirlo subito. Il manager
-                // NON installa mai bun/npm: deve farlo l'utente nella distro.
+                // NON installa mai npm: deve farlo l'utente nella distro.
                 // Stesso runtime scelto della probe (mai fallback silenzioso).
                 let rt = t.node_runtime.as_deref();
                 match probe_wsl_with_runtime(runner, &d, rt) {
@@ -551,19 +530,19 @@ pub fn run_update_with(runner: &dyn CommandRunner, fs: &dyn FsAccess, home: Opti
                         return (-1, format!("Distro WSL \"{d}\" non raggiungibile ({}). Verifica che WSL sia installato e che la distro esista (`wsl -l -v`).", p.error.unwrap_or_default()));
                     }
                     Ok(p) if p.error.is_some() => {
-                        return (-1, format!("dsh nella distro WSL \"{d}\" e rotto: {} Installa dsh nativamente nella distro (con bun o npm della distro), non via interop Windows.", p.error.unwrap_or_default()));
+                        return (-1, format!("dsh nella distro WSL \"{d}\" e rotto: {} Installa dsh nativamente nella distro (con npm della distro), non via interop Windows.", p.error.unwrap_or_default()));
                     }
-                    Ok(p) if p.has_bun != Some(true) && p.has_npm != Some(true) => {
-                        return (-1, format!("Nella distro WSL \"{d}\" mancano sia bun che npm: installa prima una toolchain (es. `curl -fsSL https://bun.sh/install | bash` oppure `sudo apt install nodejs npm`), poi riprova. Il manager non installa toolchain da solo."));
+                    Ok(p) if p.has_npm != Some(true) => {
+                        return (-1, format!("Nella distro WSL \"{d}\" manca npm: installa prima Node/npm (es. `sudo apt install nodejs npm`), poi riprova. Il manager non installa toolchain da solo."));
                     }
                     Err(e) => {
                         return (-1, format!("Distro WSL \"{d}\" non raggiungibile ({e}). Verifica che WSL sia installato e che la distro esista (`wsl -l -v`)."));
                     }
                     _ => {}
                 }
-                // Installazione con toolchain NATIVE in automatico (il runtime
-                // scelto vale per dsh, non per l'installer: bun/npm sono
-                // toolchain indipendenti). PATH nativo via `env`.
+                // Installazione col toolchain NATIVO in automatico (il runtime
+                // scelto vale per dsh, non per l'installer: npm e una toolchain
+                // indipendente). PATH nativo via `env`.
                 let home = match wsl_home_dir(runner, &d) {
                     Ok(h) => h,
                     Err(e) => return (-1, e),
@@ -572,20 +551,17 @@ pub fn run_update_with(runner: &dyn CommandRunner, fs: &dyn FsAccess, home: Opti
                 // (nvm decrescenti comprese): funziona cosi com'e.
                 let try_install = |tool: &str, args: &[&str]| -> Option<(i32, String)> {
                     match wsl_tool_path(runner, &d, &home, tool) {
-                        Ok((NativePath::Native(_), path)) => match wsl_run_native_with_path(runner, &d, &home, &path, tool, args, UPDATE_TIMEOUT) {
+                        Ok((NativePath::Native(_), path)) => match wsl_run_native_with_path(runner, &d, &path, tool, args, UPDATE_TIMEOUT) {
                             Ok((code, out, err)) => Some((code, format!("{out}\n{err}"))),
                             Err(e) => Some((-1, e)),
                         },
                         _ => None,
                     }
                 };
-                if let Some((code, out)) = try_install("bun", &["add", "-g", &pkg]) {
-                    return (code, out);
-                }
                 if let Some((code, out)) = try_install("npm", &["install", "-g", &pkg]) {
                     return (code, out);
                 }
-                (3, format!("Nella distro WSL \"{d}\" mancano sia bun che npm nativi: installa prima una toolchain nativa, poi riprova. Il manager non installa toolchain da solo."))
+                (3, format!("Nella distro WSL \"{d}\" manca npm nativo: installa prima Node/npm, poi riprova. Il manager non installa toolchain da solo."))
             }
             None => (-1, "distro WSL mancante".to_string()),
         }
@@ -618,24 +594,22 @@ mod tests {
         fn spawn_windows_detached(&self, _exe: &str, _args: &[&str], _workdir: &PathBuf, _log: &PathBuf) -> Result<u32, String> {
             match &self.fail { Some(e) => Err(e.clone()), None => Ok(self.pid) }
         }
-        fn spawn_wsl_detached(&self, _runner: &dyn CommandRunner, distro: &str, path: &str, home: &str, ws: &str, bin: &str, args: &[&str], _log: &PathBuf) -> Result<(), String> {
-            *self.last_spawn.lock().unwrap() = Some((distro.to_string(), format!("{path}::{home}"), bin.to_string(), args.iter().map(|s| s.to_string()).collect()));
+        fn spawn_wsl_detached(&self, _runner: &dyn CommandRunner, distro: &str, path: &str, ws: &str, bin: &str, args: &[&str], _log: &PathBuf) -> Result<(), String> {
+            *self.last_spawn.lock().unwrap() = Some((distro.to_string(), path.to_string(), bin.to_string(), args.iter().map(|s| s.to_string()).collect()));
             let _ = ws;
             match &self.fail { Some(e) => Err(e.clone()), None => Ok(()) }
         }
     }
     /// Runner atomico programmabile: risponde a printenv/which/version/tail/
     /// pkill/porta per argv (niente script composti). Default: distro con
-    /// dsh+bun nativi, versione 1.0.0, porta chiusa, log vuoto.
+    /// dsh+npm nativi, versione 1.0.0, porta chiusa, log vuoto.
     #[derive(Default)]
     struct AtomRunner {
         home: Option<String>,
         dsh: Option<String>,
-        bun: Option<String>,
         npm: Option<String>,
         version_out: Option<(i32, String, String)>,
         port_open: bool,
-        buns_install: Option<(i32, String)>,
         npm_install: Option<(i32, String)>,
         list: Option<String>,
     }
@@ -643,24 +617,22 @@ mod tests {
         fn native() -> Self {
             Self {
                 home: Some("/home/u".into()),
-                dsh: Some("/home/u/.bun/bin/dsh".into()),
-                bun: Some("/home/u/.bun/bin/bun".into()),
-                npm: None,
+                dsh: Some("/home/u/.local/bin/dsh".into()),
+                npm: Some("/usr/bin/npm".into()),
                 version_out: Some((0, "dsh version 1.0.0".into(), String::new())),
                 port_open: false,
-                buns_install: Some((0, "installed".into())),
-                npm_install: None,
+                npm_install: Some((0, "installed".into())),
                 list: Some("NAME S V\nU Running 2\n".into()),
             }
         }
         fn no_dsh() -> Self {
-            Self { home: Some("/home/u".into()), dsh: None, bun: Some("/b".into()), npm: None,
-                version_out: None, port_open: false, buns_install: None, npm_install: None,
+            Self { home: Some("/home/u".into()), dsh: None, npm: Some("/usr/bin/npm".into()),
+                version_out: None, port_open: false, npm_install: None,
                 list: Some("NAME S V\nU Running 2\n".into()) }
         }
         fn interop_dsh() -> Self {
-            Self { home: Some("/home/u".into()), dsh: Some("/mnt/c/x/dsh".into()), bun: Some("/b".into()), npm: None,
-                version_out: None, port_open: false, buns_install: None, npm_install: None,
+            Self { home: Some("/home/u".into()), dsh: Some("/mnt/c/x/dsh".into()), npm: Some("/usr/bin/npm".into()),
+                version_out: None, port_open: false, npm_install: None,
                 list: Some("NAME S V\nU Running 2\n".into()) }
         }
     }
@@ -690,7 +662,7 @@ mod tests {
                 if cmd.contains("/dev/tcp") {
                     return Ok((0, if self.port_open { "OPEN".into() } else { "CLOSED".into() }, String::new()));
                 }
-                let hit = match bin { "dsh" => &self.dsh, "bun" => &self.bun, "npm" => &self.npm, _ => &None };
+                let hit = match bin { "dsh" => &self.dsh, "npm" => &self.npm, _ => &None };
                 return match hit {
                     Some(p) => Ok((0, format!("{p}\n"), String::new())),
                     None => Ok((1, String::new(), String::new())),
@@ -703,13 +675,7 @@ mod tests {
                     None => Ok((1, String::new(), "no version".into())),
                 };
             }
-            // bun add -g / npm install -g
-            if a.contains(&"bun") && a.contains(&"add") {
-                return match &self.buns_install {
-                    Some((c, o)) => Ok((*c, o.clone(), String::new())),
-                    None => Ok((1, String::new(), "bun assente".into())),
-                };
-            }
+            // npm install -g
             if a.contains(&"npm") && a.contains(&"install") {
                 return match &self.npm_install {
                     Some((c, o)) => Ok((*c, o.clone(), String::new())),
@@ -771,7 +737,7 @@ mod tests {
         let (distro, path_home, bin, args) = sp.last_spawn.lock().unwrap().clone().unwrap();
         assert_eq!(distro, "Ubuntu");
         assert!(path_home.contains("/home/u"), "{path_home}");
-        assert_eq!(bin, "/home/u/.bun/bin/dsh", "spawn per percorso assoluto, non per nome");
+        assert_eq!(bin, "/home/u/.local/bin/dsh", "spawn per percorso assoluto, non per nome");
         assert!(args.contains(&"web".to_string()));
         assert!(args.contains(&"3100".to_string()));
         for a in &args {
@@ -822,7 +788,7 @@ mod tests {
         assert!(start_wsl_with_timeout(&runner, &prober, &fs, &sp, &target("wsl", None, 3100), Duration::from_millis(1), |_| {}).is_err());
     }
     #[test]
-    fn preflight_ok_when_dsh_and_bun_present() {
+    fn preflight_ok_when_dsh_and_npm_present() {
         assert!(preflight_wsl(&AtomRunner::native(), "U", true).is_ok());
     }
     #[test]
@@ -831,11 +797,12 @@ mod tests {
         assert!(e.contains("dsh non trovato"), "{e}");
     }
     #[test]
-    fn preflight_hints_toolchain_when_both_missing() {
+    fn preflight_hints_npm_when_missing() {
         let mut r = AtomRunner::no_dsh();
-        r.bun = None;
+        r.npm = None;
         let e = preflight_wsl(&r, "U", true).unwrap_err();
         assert!(e.contains("dsh non trovato"), "{e}");
+        assert!(e.contains("npm"), "{e}");
     }
     #[test]
     fn preflight_broken_wrapper_names_dsh_not_distro() {
@@ -950,17 +917,16 @@ mod tests {
     }
     #[test]
     fn update_wsl_refuses_interop_toolchain() {
-        // bun/npm SOLO via interop: come assenti (mondi separati).
+        // npm SOLO via interop: come assente (mondi separati).
         let mut r = AtomRunner::no_dsh();
-        r.bun = Some("/mnt/c/bun.exe".into());
         r.npm = Some("/mnt/c/npm".into());
-        let (code, msg) = run_update_with(&r, &FakeFs::default(), None, &target("wsl", Some("U"), 3100), "1.0.0");
+        let (code, msg) = run_update_with(&r, &target("wsl", Some("U"), 3100), "1.0.0");
         assert_eq!(code, -1);
-        assert!(msg.contains("nativi") || msg.contains("toolchain"), "{msg}");
+        assert!(msg.contains("npm"), "{msg}");
     }
     #[test]
-    fn update_wsl_uses_bun_natively() {
-        let (code, out) = run_update_with(&AtomRunner::native(), &FakeFs::default(), None, &target("wsl", Some("U"), 3100), "1.0.0");
+    fn update_wsl_uses_npm_natively() {
+        let (code, out) = run_update_with(&AtomRunner::native(), &target("wsl", Some("U"), 3100), "1.0.0");
         assert_eq!(code, 0);
         assert!(out.contains("installed"), "{out}");
     }
@@ -971,12 +937,12 @@ mod tests {
         assert!(d.error.unwrap_or_default().contains("/mnt/c/x/dsh"));
     }
     #[test]
-    fn update_wsl_refuses_without_toolchain() {
+    fn update_wsl_refuses_without_npm() {
         let mut r = AtomRunner::no_dsh();
-        r.bun = None;
-        let (code, out) = run_update_with(&r, &FakeFs::default(), None, &target("wsl", Some("U"), 3100), "1.0.0");
+        r.npm = None;
+        let (code, out) = run_update_with(&r, &target("wsl", Some("U"), 3100), "1.0.0");
         assert_eq!(code, -1);
-        assert!(out.contains("nativi") || out.contains("toolchain"), "{out}");
+        assert!(out.contains("npm"), "{out}");
     }
     #[test]
     fn read_env_log_wsl_missing_reports_diagnostics_hint() {
@@ -1027,41 +993,35 @@ mod tests {
         assert!(stop_wsl_with(&any, &target("wsl", None, 3100)).is_err());
     }
     #[test]
-    fn update_windows_prefers_bun_exe() {
-        let home = PathBuf::from("/home/u");
-        let fs = FakeFs::with("/home/u/.bun/bin/bun.exe", "");
-        let bun = PathBuf::from("/home/u").join(".bun").join("bin").join("bun.exe").to_string_lossy().into_owned();
-        let r = FakeRunner::with_output(&bun, &["add", "-g", "@deepseek-ai/dsh@2.0.0"], 0, "ok", "");
-        let (code, out) = run_update_with(&r, &fs, Some(home), &target("windows", None, 3080), "2.0.0");
+    fn update_windows_uses_npm() {
+        let r = FakeRunner::default();
+        r.outputs.lock().unwrap().insert("npm install -g @deepseek-ai/dsh@2.0.0".into(), (0, "ok".into(), String::new()));
+        let (code, out) = run_update_with(&r, &target("windows", None, 3080), "2.0.0");
         assert_eq!(code, 0);
         assert!(out.contains("ok"));
     }
     #[test]
-    fn update_windows_falls_back_to_bun_on_path() {
-        // bun su PATH fallisce -> si prova npm (stub di entrambi).
-        let fs = FakeFs::default();
+    fn update_windows_surfaces_npm_error() {
+        // npm fallisce: l'errore esce com'e (nessun altro installer tentato).
         let r = FakeRunner::default();
-        r.outputs.lock().unwrap().insert("bun add -g @deepseek-ai/dsh@1.0.0".into(), (1, String::new(), "err-bun".into()));
         r.outputs.lock().unwrap().insert("npm install -g @deepseek-ai/dsh@1.0.0".into(), (1, String::new(), "err-npm".into()));
-        let (code, out) = run_update_with(&r, &fs, Some(PathBuf::from("/h")), &target("windows", None, 3080), "1.0.0");
+        let (code, out) = run_update_with(&r, &target("windows", None, 3080), "1.0.0");
         assert_eq!(code, 1);
         assert!(out.contains("err-npm"), "{out}");
     }
     #[test]
-    fn update_windows_npm_saves_when_bun_missing() {
-        // bun assente (Err) -> npm riesce: downgrade/reinstall via npm ok.
-        let fs = FakeFs::default();
+    fn update_windows_surfaces_missing_npm_as_error() {
+        // npm assente (Err di spawn): errore esplicito, nessun fallback.
         let r = FakeRunner::default();
-        r.errors.lock().unwrap().insert("bun add -g @deepseek-ai/dsh@0.0.1-rc.1".into(), "errore esecuzione bun: not found".into());
-        r.outputs.lock().unwrap().insert("npm install -g @deepseek-ai/dsh@0.0.1-rc.1".into(), (0, "ok-npm".into(), String::new()));
-        let (code, out) = run_update_with(&r, &fs, Some(PathBuf::from("/h")), &target("windows", None, 3080), "0.0.1-rc.1");
-        assert_eq!(code, 0);
-        assert!(out.contains("ok-npm"), "{out}");
+        r.errors.lock().unwrap().insert("npm install -g @deepseek-ai/dsh@0.0.1-rc.1".into(), "npm non trovato".into());
+        let (code, out) = run_update_with(&r, &target("windows", None, 3080), "0.0.1-rc.1");
+        assert_eq!(code, -1);
+        assert!(out.contains("npm non trovato"), "{out}");
     }
     #[test]
     fn update_wsl_reports_missing_distro() {
         let r = FakeRunner::default();
-        let (code, _) = run_update_with(&r, &FakeFs::default(), None, &target("wsl", None, 3100), "1.0.0");
+        let (code, _) = run_update_with(&r, &target("wsl", None, 3100), "1.0.0");
         assert_eq!(code, -1);
     }
     #[test]

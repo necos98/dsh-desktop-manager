@@ -13,7 +13,7 @@ import type {
   WslDistro,
 } from './types';
 
-/** Verifica dsh sull'ambiente Windows (PATH, bun/npm global). */
+/** Verifica dsh sull'ambiente Windows (PATH, npm global). */
 export function detectWindows(): Promise<EnvProbe> {
   return defaultGateway.detectWindows();
 }

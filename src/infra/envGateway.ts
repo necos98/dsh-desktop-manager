@@ -17,7 +17,7 @@ import type {
 
 /** Porta backend (ISP: un metodo per comando, nessuna dipendenza UI). */
 export interface EnvGateway {
-  /** Verifica dsh sull'ambiente Windows (PATH, bun/npm global). */
+  /** Verifica dsh sull'ambiente Windows (PATH, npm global). */
   detectWindows(): Promise<EnvProbe>;
   /** Elenca le distro WSL disponibili. */
   listWslDistros(): Promise<WslDistro[]>;

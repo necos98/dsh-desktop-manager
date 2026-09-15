@@ -10,9 +10,8 @@ export interface EnvProbe {
   executable?: string | null;
   dshHome?: string | null;
   error?: string | null;
-  /** Toolchain rilevata (None = non verificata). Il manager non installa
-   *  mai bun/npm: se mancano entrambe, deve installarle l'utente. */
-  hasBun?: boolean | null;
+  /** npm rilevato (None = non verificato). Il manager non installa mai
+   *  toolchain: se manca, deve installarla l'utente. */
   hasNpm?: boolean | null;
 }
 
@@ -33,7 +32,6 @@ export interface WslDiag {
   state?: string | null;
   dshInstalled: boolean;
   dshVersion?: string | null;
-  hasBun: boolean;
   hasNpm: boolean;
   portOpenInDistro?: boolean | null;
   portOpenFromWindows: boolean;
@@ -54,7 +52,6 @@ export interface CachedDistro {
   name: string;
   state: string;
   home: string;
-  hasBun: boolean;
   hasNpm: boolean;
   dshNativePath?: string | null;
   dshVersion?: string | null;

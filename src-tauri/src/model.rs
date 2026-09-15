@@ -14,11 +14,10 @@ pub struct EnvProbe {
     pub executable: Option<String>,
     pub dsh_home: Option<String>,
     pub error: Option<String>,
-    /// Toolchain rilevata nell'ambiente (None = non verificata). Serve per
-    /// avvisare l'utente quando ne bun ne npm sono presenti: in quel caso
+    /// npm rilevato nell'ambiente (None = non verificato). Serve per
+    /// avvisare l'utente quando npm manca: in quel caso
     /// installazione/aggiornamento sono impossibili e tocca all'utente
-    /// installarli (il manager non installa mai toolchain da solo).
-    pub has_bun: Option<bool>,
+    /// installarlo (il manager non installa mai toolchain da solo).
     pub has_npm: Option<bool>,
 }
 
@@ -35,7 +34,6 @@ impl EnvProbe {
             executable: None,
             dsh_home: None,
             error: None,
-            has_bun: None,
             has_npm: None,
         }
     }
@@ -81,7 +79,7 @@ pub struct NodeRuntime {
     pub node_version: Option<String>,
     /// True se e il default nvm (alias) o l'unico di sistema.
     pub is_default: bool,
-    /// Origine: `nvm`, `system`, `bun` (bun include node compat).
+    /// Origine: `nvm`, `system`.
     pub source: String,
 }
 
@@ -140,7 +138,6 @@ pub struct WslDiag {
     pub state: Option<String>,
     pub dsh_installed: bool,
     pub dsh_version: Option<String>,
-    pub has_bun: bool,
     pub has_npm: bool,
     /// Porta aperta vista da dentro la distro (/dev/tcp): distingue
     /// "server giu" da "server su ma irraggiungibile da Windows (rete WSL2)".
@@ -200,7 +197,6 @@ mod tests {
         assert!(!p.installed);
         assert_eq!(p.kind, "windows");
         assert!(p.version.is_none());
-        assert!(p.has_bun.is_none());
         assert!(p.has_npm.is_none());
     }
 }
