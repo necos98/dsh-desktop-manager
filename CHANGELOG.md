@@ -6,6 +6,8 @@ pubblicato come Release scaricabile dalla Action `Release`.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-15
+
 ### Fixed
 
 - Su Windows install/update e avvio fallivano con «errore esecuzione npm: program not found» quando npm/dsh erano gli shim `.cmd` di Node (`Command::new` non esegue i wrapper): ora i wrapper vengono lanciati via `cmd /C`.

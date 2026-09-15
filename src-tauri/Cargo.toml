@@ -1,6 +1,6 @@
 [package]
 name = "dsh-desktop-manager"
-version = "0.5.1"
+version = "0.5.2"
 description = "Gestore desktop per DeepSeek Harness (DSH)"
 authors = ["j.magarelli"]
 edition = "2021"
