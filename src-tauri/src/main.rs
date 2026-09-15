@@ -28,12 +28,12 @@ mod util;
 mod webviews;
 
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::{LogicalPosition, LogicalSize, Manager, RunEvent, State, WebviewUrl};
 use tauri::webview::{NewWindowResponse, WebviewBuilder};
 
-use detect::{detect_windows_sync, list_node_runtimes_with, list_wsl_distros_with, probe_wsl_with_runtime};
+use detect::{list_node_runtimes_with, list_wsl_distros_with, probe_wsl_fast_with, probe_wsl_with_runtime, CachedDistro, PathSnapshot, WSL_BOOT_TIMEOUT, WSL_WARM_TIMEOUT};
 use lifecycle::{
     diagnose_wsl_with_runtime, find_auth_url_sync, find_free_port_with, read_env_log_with,
     run_update_with, start_windows_with, start_wsl_with, stop_wsl_with, SystemSpawner,
@@ -46,6 +46,44 @@ use model::{
 /// Stato gestito: processi avviati dal manager (mai quelli esterni).
 struct Procs {
     inner: Mutex<proc::ProcRegistry>,
+}
+
+/// Stato rilevamento: snapshot PATH con TTL (una passata per finestra).
+struct DetectCache {
+    at: Mutex<Option<Instant>>,
+}
+
+/// TTL cache rilevamento Windows (fs locale: la scansione costa poco, ma
+/// ogni comando la rifaceva — con N comandi all'avvio si somma).
+const DETECT_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// Cache ultimo `scan_boot` per distro (stato Running + esito sonde): la
+/// prima sonda dopo un boot freddo usa WSL_BOOT_TIMEOUT, le altre
+/// WSL_WARM_TIMEOUT (15s bastano a distro calda, vedi baseline 0.1s/spawn).
+struct WslBootCache {
+    inner: Mutex<std::collections::HashMap<String, bool>>,
+}
+
+impl WslBootCache {
+    fn timeout_for(&self, distro: &str, state: Option<&str>) -> Duration {
+        let running = state.map(|s| s.eq_ignore_ascii_case("running")).unwrap_or(false);
+        let known = self.inner.lock().unwrap().get(distro).copied().unwrap_or(false);
+        if running || known {
+            WSL_WARM_TIMEOUT
+        } else {
+            WSL_BOOT_TIMEOUT
+        }
+    }
+
+    fn mark_contacted(&self, distro: &str) {
+        self.inner.lock().unwrap().insert(distro.to_string(), true);
+    }
+}
+
+/// Misura un comando e lo registra nel log (strumentazione cold-boot: le
+/// fasi di avvio risultano nei log con `BOOT cmd=<nome> ms=<durata>`).
+fn log_boot_phase(cmd: &str, started: Instant) {
+    eprintln!("BOOT cmd={cmd} ms={}", started.elapsed().as_millis());
 }
 
 /// Esegue un comando con timeout su un thread dedicato (versione async-safe).
@@ -64,8 +102,12 @@ where
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-async fn detect_windows() -> EnvProbe {
-    blocking(|| Ok(detect_windows_sync())).await.unwrap_or_else(|e| EnvProbe {
+async fn detect_windows(cache: State<'_, DetectCache>) -> Result<EnvProbe, String> {
+    let t0 = Instant::now();
+    let path = refresh_detect_cache(&cache);
+    let probe = blocking(move || Ok(detect::detect_windows_with_path(&proc::SystemRunner, &proc::SystemRunner, proc::home_dir(), &path)))
+    .await
+    .unwrap_or_else(|e| EnvProbe {
         kind: "windows".into(),
         name: "Windows".into(),
         distro: None,
@@ -76,17 +118,151 @@ async fn detect_windows() -> EnvProbe {
         error: Some(e),
         has_bun: None,
         has_npm: None,
-    })
+    });
+    log_boot_phase("detect_windows", t0);
+    Ok(probe)
+}
+
+/// Rilegge lo snapshot PATH se la cache e scaduta (una sola scansione per
+/// finestra TTL invece di una per comando).
+fn refresh_detect_cache(cache: &DetectCache) -> PathSnapshot {
+    // PathSnapshot non e Clone: ricattura solo quando serve. Il lock resta
+    // corto (solo lettura timestamp); la cattura avviene fuori dal lock.
+    let stale = {
+        let guard = cache.at.lock().unwrap();
+        guard.map(|at| at.elapsed() > DETECT_CACHE_TTL).unwrap_or(true)
+    };
+    if stale {
+        let fresh = PathSnapshot::capture();
+        // Ricontrolla sotto lock (un altro thread puo aver gia aggiornato).
+        let mut guard = cache.at.lock().unwrap();
+        if guard.map(|at| at.elapsed() > DETECT_CACHE_TTL).unwrap_or(true) {
+            *guard = Some(Instant::now());
+            return fresh;
+        }
+    }
+    PathSnapshot::capture()
 }
 
 #[tauri::command]
 async fn list_wsl_distros() -> Result<Vec<WslDistro>, String> {
-    blocking(|| list_wsl_distros_with(&proc::SystemRunner)).await
+    let t0 = Instant::now();
+    let out = blocking(|| list_wsl_distros_with(&proc::SystemRunner)).await;
+    log_boot_phase("list_wsl_distros", t0);
+    out
 }
 
 #[tauri::command]
 async fn probe_wsl(distro: String, node_runtime: Option<String>) -> Result<EnvProbe, String> {
-    blocking(move || probe_wsl_with_runtime(&proc::SystemRunner, &distro, node_runtime.as_deref())).await
+    let t0 = Instant::now();
+    let out = blocking(move || probe_wsl_with_runtime(&proc::SystemRunner, &distro, node_runtime.as_deref())).await;
+    log_boot_phase("probe_wsl", t0);
+    out
+}
+
+/// Sonda WSL veloce a singolo spawn (avvio + refresh): per N distro costa
+/// ~N spawn invece di ~5-9N. Timeout caldo di default; la prima sonda dopo
+/// un boot freddo usa WSL_BOOT_TIMEOUT (vedi `scan_boot`).
+/// `wsl_state`: stato distro da `wsl -l -v` (Running -> timeout caldo).
+#[tauri::command]
+async fn probe_wsl_fast(
+    distro: String,
+    wsl_state: Option<String>,
+    boot_cache: State<'_, WslBootCache>,
+) -> Result<EnvProbe, String> {
+    let t0 = Instant::now();
+    let timeout = boot_cache.timeout_for(&distro, wsl_state.as_deref());
+    let distro_for_cache = distro.clone();
+    let out = blocking(move || probe_wsl_fast_with(&proc::SystemRunner, &distro, timeout)).await;
+    if out.is_ok() {
+        boot_cache.mark_contacted(&distro_for_cache);
+    }
+    log_boot_phase("probe_wsl_fast", t0);
+    out
+}
+
+/// Avvio rapido in UN giro: elenco distro + cache HOME/toolchain/stato per
+/// la prima pittura, senza sonde per-distro (zero spawn oltre `wsl -l -v`).
+/// Il frontend dipinge subito le righe e arricchisce in background.
+#[tauri::command]
+async fn scan_boot(boot_cache: State<'_, WslBootCache>) -> Result<BootScan, String> {
+    let t0 = Instant::now();
+    // Snapshot dei nomi gia contattati (fuori dal lock e fuori dal closure
+    // 'static: State non puo entrare nei comandi async che ritornano Result
+    // con riferimenti — si passa solo una copia owned).
+    let known: std::collections::HashSet<String> = boot_cache
+        .inner
+        .lock()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    let out = blocking(move || {
+        let distros = list_wsl_distros_with(&proc::SystemRunner)?;
+        let mut cached: Vec<CachedDistro> = Vec::with_capacity(distros.len());
+        let mut contacted: Vec<String> = vec![];
+        for d in &distros {
+            // Stopped + mai contattata: NESSUNO spawn (il boot freddo da
+            // 4.5s resta in background). Running o nota: UN solo spawn
+            // veloce per HOME/toolchain (0.1s, vedi baseline).
+            let running = d.state.eq_ignore_ascii_case("running");
+            let was_known = known.contains(&d.name);
+            if running || was_known {
+                match probe_wsl_fast_with(&proc::SystemRunner, &d.name, WSL_WARM_TIMEOUT) {
+                    Ok(p) => {
+                        contacted.push(d.name.clone());
+                        cached.push(CachedDistro {
+                            name: d.name.clone(),
+                            state: d.state.clone(),
+                            home: String::new(),
+                            has_bun: p.has_bun.unwrap_or(false),
+                            has_npm: p.has_npm.unwrap_or(false),
+                            dsh_native_path: p.executable.as_ref().and_then(|e| {
+                                e.strip_prefix("dsh nativo (")
+                                    .and_then(|s| s.strip_suffix(')'))
+                                    .map(|s| s.to_string())
+                            }),
+                            dsh_version: p.version.clone(),
+                        });
+                    }
+                    Err(_) => {
+                        cached.push(CachedDistro {
+                            name: d.name.clone(),
+                            state: d.state.clone(),
+                            ..Default::default()
+                        });
+                    }
+                }
+            } else {
+                cached.push(CachedDistro {
+                    name: d.name.clone(),
+                    state: d.state.clone(),
+                    ..Default::default()
+                });
+            }
+        }
+        Ok(BootScan { distros, cached, contacted })
+    })
+    .await;
+    if let Ok(scan) = &out {
+        let mut guard = boot_cache.inner.lock().unwrap();
+        for name in &scan.contacted {
+            guard.insert(name.clone(), true);
+        }
+    }
+    log_boot_phase("scan_boot", t0);
+    out
+}
+
+/// Elenco distro + cache per la prima pittura (vedi `scan_boot`).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BootScan {
+    distros: Vec<WslDistro>,
+    cached: Vec<CachedDistro>,
+    /// Distro contattate con successo (il backend le segna nella cache boot).
+    #[serde(skip_serializing)]
+    contacted: Vec<String>,
 }
 
 /// Runtime Node disponibili nella distro (nvm decrescenti + sistema).
@@ -157,7 +333,7 @@ async fn start_env(state: State<'_, Procs>, target: EnvTarget) -> Result<StartRe
         let runner = proc::SystemRunner;
         let spawner = SystemSpawner;
         let (pid, used_port, reached) = if closure_target.kind == "windows" {
-            let exe = detect_windows_sync().executable;
+            let exe = detect::detect_windows_sync().executable;
             start_windows_with(&runner, &runner, &spawner, move || exe.clone(), &closure_target, |ms| std::thread::sleep(std::time::Duration::from_millis(ms)))
         } else {
             start_wsl_with(&runner, &runner, &runner, &spawner, &closure_target, |ms| std::thread::sleep(std::time::Duration::from_millis(ms)))
@@ -378,15 +554,21 @@ fn cleanup_started(state: &Procs) {
 
 fn main() {
     tauri::Builder::default()
+        // Updater in background: il check all'avvio e differito dal frontend
+        // (nessun costo sincrono qui); il plugin serve solo su azione utente.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(Procs {
             inner: Mutex::new(proc::ProcRegistry::default()),
         })
+        .manage(DetectCache { at: Mutex::new(None) })
+        .manage(WslBootCache { inner: Mutex::new(std::collections::HashMap::new()) })
         .invoke_handler(tauri::generate_handler![
             detect_windows,
             list_wsl_distros,
+            scan_boot,
             probe_wsl,
+            probe_wsl_fast,
             list_node_runtimes,
             is_port_open,
             find_free_port,

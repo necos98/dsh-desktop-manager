@@ -158,6 +158,9 @@ export function badgeStatus(
 ): { text: string; cls: string } {
   if (e.running) return { text: "In esecuzione :" + e.settings.port, cls: "ok" };
   if (e.busy) return { text: "operazione in corso", cls: "busy" };
+  // Sonda non ancora arrivata (prima pittura progressiva): riga in attesa,
+  // mai "Non installato" (sarebbe un falso negativo prima delle sonde).
+  if (!e.probe) return { text: "Rilevamento…", cls: "busy" };
   if (!e.probe?.installed) return { text: "Non installato", cls: "warn" };
   if (!e.probe.version) {
     // dsh rilevato ma `dsh --version` non restituisce semver (tipico wrapper
@@ -216,6 +219,22 @@ export function upsertEnv(envs: EnvRow[], input: UpsertInput): EnvRow[] {
 /** Rimuove le righe i cui id non sono piu rilevati (es. distro WSL eliminate). */
 export function pruneEnvs(envs: EnvRow[], seen: Set<string>): EnvRow[] {
   return envs.filter((e) => seen.has(e.id));
+}
+
+/** Applica una probe arrivata in background a una riga (arricchimento
+ *  progressivo): aggiorna probe/wslState, conserva settings/running/busy.
+ *  Pura (nuovo array, stesse righe non toccate per riferimento). */
+export function markRowProbed(
+  envs: EnvRow[],
+  id: string,
+  probe: EnvProbe | null,
+  wslState?: string,
+): EnvRow[] {
+  return envs.map((e) =>
+    e.id === id
+      ? { ...e, probe, wslState: wslState ?? e.wslState }
+      : e,
+  );
 }
 
 /** Porta di default per una distro WSL in base all'indice in `wsl -l -v`. */

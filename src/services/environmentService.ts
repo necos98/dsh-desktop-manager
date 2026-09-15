@@ -17,16 +17,50 @@ import type { EnvGateway } from '../infra/envGateway';
 import { NpmRegistryClient } from '../infra/registryClient';
 import {
   BrowserSettingsStorage,
+  loadCachedRegistry,
   saveAllSettings,
+  saveCachedRegistry,
   settingsFor,
   type SettingsStoragePort,
 } from './settingsStore';
-import type { EnvProbe, EnvSettings, EnvTarget, RegistryData, WslDiag } from '../types';
+import type { BootScan, CachedDistro, EnvProbe, EnvSettings, EnvTarget, RegistryData, WslDiag } from '../types';
+
+/** Probe provvisoria da cache per la prima pittura (nessuno spawn): versione
+ *  nota solo senza runtime scelto (altrimenti va riverificata). Pura. */
+export function staleProbeFor(
+  distro: string,
+  cached: CachedDistro | undefined,
+  current: EnvRow[],
+): EnvProbe | null {
+  if (!cached) return null;
+  const existing = current.find((e) => e.id === "wsl:" + distro);
+  if (existing?.settings.nodeRuntime) return null;
+  return {
+    kind: "wsl",
+    name: distro,
+    distro,
+    installed: cached.dshVersion != null && cached.dshNativePath != null,
+    version: cached.dshVersion ?? null,
+    executable: cached.dshNativePath ? `dsh nativo (${cached.dshNativePath})` : null,
+    error: null,
+    hasBun: cached.hasBun,
+    hasNpm: cached.hasNpm,
+  };
+}
 
 export interface ScanResult {
   envs: EnvRow[];
   /** Messaggio di errore non fatale (es. elenco WSL fallito) oppure "". */
   status: string;
+}
+
+/** Riga provvisoria per una distro non ancora sondata (prima pittura).
+ *  `probe: null` = "in attesa di sonda" (badge dedicato, mai "Non installato"). */
+export interface PendingWslRow {
+  id: string;
+  name: string;
+  distro: string;
+  wslState?: string;
 }
 
 export interface StartOutcome {
@@ -48,7 +82,12 @@ export type UpdateOutcome =
 export interface RegistryOutcome {
   registry: RegistryData | null;
   error: string | null;
+  /** True quando il registry viene dalla cache (rete lenta/assente). */
+  stale?: boolean;
 }
+
+/** Timeout fetch registry in avvio: oltre non si aspetta (cache o errore). */
+export const REGISTRY_TIMEOUT_MS = 3500;
 
 export interface EnvLogOutcome {
   path: string;
@@ -72,7 +111,103 @@ export class EnvironmentService {
     saveAllSettings(this.storage, envs);
   }
 
-  /** Rileva Windows + distro WSL, aggiorna/prosciuga le righe (pura orchestrazione I/O). */
+  /** Rileva Windows + distro WSL, aggiorna/prosciuga le righe (pura orchestrazione I/O).
+   *
+   *  Strategia a due stadi (cold-boot):
+   *  - `scanBootFast`: UN giro backend (elenco + cache), nessuna sonda
+   *    per-distro — la prima pittura arriva in ~100ms;
+   *  - `enrichRow`: sonda completa per UNA riga (background, una alla volta:
+   *    i wsl.exe corrono comunque in parallelo lato backend per distro
+   *    diverse, ma il frontend non spara N invoke insieme al primo paint).
+   *  `scanEnvironments` resta il giro completo sincrono (refresh manuale,
+   *  post-avvio, update): stesso verdetto di prima, nessuna scorciatoia.
+   */
+  async scanBootFast(current: EnvRow[]): Promise<ScanResult> {
+    let envs = [...current];
+    let status = "";
+
+    // Windows e distro viaggiano in parallelo (indipendenti tra loro).
+    const [windowsProbe, boot] = await Promise.all([
+      this.gateway.detectWindows().catch(() => null),
+      this.gateway
+        .scanBoot()
+        .then((s): BootScan | { error: string } => s)
+        .catch((e): { error: string } => ({ error: String(e) })),
+    ]);
+    envs = upsertEnv(envs, {
+      id: "windows",
+      kind: "windows",
+      name: "Windows",
+      probe: windowsProbe,
+      settings: this.settingsFor("windows", { port: WINDOWS_DEFAULT_PORT }),
+    });
+
+    if ("error" in boot) {
+      status = "Errore elenco WSL: " + boot.error;
+    } else {
+      const byName = new Map(boot.cached.map((c) => [c.name, c]));
+      const seen = new Set(["windows", ...boot.distros.map((d) => "wsl:" + d.name)]);
+      envs = pruneEnvs(envs, seen);
+      boot.distros.forEach((d, index) => {
+        envs = upsertEnv(envs, {
+          id: "wsl:" + d.name,
+          kind: "wsl",
+          name: d.name,
+          distro: d.name,
+          wslState: d.state,
+          probe: staleProbeFor(d.name, byName.get(d.name), current),
+          settings: this.settingsFor("wsl:" + d.name, { port: wslDefaultPort(index) }),
+        });
+      });
+    }
+    if (envs.length === 0) {
+      envs = upsertEnv(envs, {
+        id: "windows",
+        kind: "windows",
+        name: "Windows",
+        probe: windowsProbe,
+        settings: this.settingsFor("windows", { port: WINDOWS_DEFAULT_PORT }),
+      });
+    }
+    return { envs, status };
+  }
+
+  /** Sonda completa per UNA riga WSL (arricchimento background dopo la prima
+   *  pittura). Ritorna la probe (o l'errore come probe scollegata); la UI
+   *  applica il risultato alla riga. Mai un throw. */
+  async enrichRow(e: EnvRow): Promise<EnvProbe> {
+    if (e.kind !== "wsl") {
+      try {
+        return await this.gateway.detectWindows();
+      } catch (err) {
+        return {
+          kind: "windows",
+          name: e.name,
+          installed: false,
+          error: String(err),
+        } as EnvProbe;
+      }
+    }
+    const distro = e.distro ?? e.name;
+    const rt = e.settings.nodeRuntime ?? null;
+    try {
+      // Runtime scelto esplicitamente: serve il PATH esatto (sonda completa).
+      // Altrimenti la sonda veloce a 1 spawn basta per versione + toolchain.
+      const probe = rt
+        ? await this.gateway.probeWsl(distro, rt)
+        : await this.gateway.probeWslFast(distro, e.wslState ?? null);
+      return probe;
+    } catch (err) {
+      return {
+        kind: "wsl",
+        name: distro,
+        distro,
+        installed: false,
+        error: String(err),
+      } as EnvProbe;
+    }
+  }
+
   async scanEnvironments(current: EnvRow[]): Promise<ScanResult> {
     let envs = [...current];
     let status = "";
@@ -254,10 +389,21 @@ export class EnvironmentService {
 
   async loadRegistry(): Promise<RegistryOutcome> {
     try {
-      return { registry: await this.registryClient.fetchRegistry(), error: null };
+      const data = await this.registryClient.fetchRegistryWithTimeout(REGISTRY_TIMEOUT_MS);
+      saveCachedRegistry(this.storage, data);
+      return { registry: data, error: null };
     } catch (e) {
+      // Rete lenta/assente: la UI riusa l'ultimo registry noto (se fresco)
+      // invece di mostrare "registry non raggiungibile" a ogni avvio.
+      const cached = loadCachedRegistry(this.storage);
+      if (cached) return { registry: cached, error: null, stale: true };
       return { registry: null, error: String(e) };
     }
+  }
+
+  /** Ultimo registry noto senza rete (prima pittura sincrona). */
+  loadCachedRegistry(): RegistryData | null {
+    return loadCachedRegistry(this.storage);
   }
 
   /** Legge la coda del log di un ambiente (mai un throw: errore in outcome). */

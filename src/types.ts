@@ -47,6 +47,25 @@ export interface WslDistro {
   wslVersion?: string | null;
 }
 
+/** Snapshot per-distro per la prima pittura (comando scan_boot): HOME e
+ *  toolchain senza sonde pesanti. `dsh_native_path`: percorso classificato
+ *  nativo (mai /mnt/*); `dsh_version`: versione nota dall'ultima sonda. */
+export interface CachedDistro {
+  name: string;
+  state: string;
+  home: string;
+  hasBun: boolean;
+  hasNpm: boolean;
+  dshNativePath?: string | null;
+  dshVersion?: string | null;
+}
+
+/** Elenco distro + cache per la prima pittura (comando scan_boot). */
+export interface BootScan {
+  distros: WslDistro[];
+  cached: CachedDistro[];
+}
+
 export interface EnvTarget {
   kind: string; // "windows" | "wsl"
   name: string;

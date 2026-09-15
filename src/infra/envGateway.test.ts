@@ -15,6 +15,8 @@ describe('TauriEnvGateway (porta verso il backend)', () => {
     const gw = gateway(calls, (cmd) => (cmd === "find_free_port" ? 4000 : cmd === "is_port_open" ? true : {}));
     await gw.detectWindows();
     await gw.listWslDistros();
+    await gw.scanBoot();
+    await gw.probeWslFast('Ubuntu', 'Running');
     await gw.probeWsl('Ubuntu');
     await gw.isPortOpen(3080);
     await gw.findFreePort(3080);
@@ -28,7 +30,9 @@ describe('TauriEnvGateway (porta verso il backend)', () => {
     await gw.probeWsl('U', '/home/u/.nvm/versions/node/v24.20.0/bin');
     await gw.listNodeRuntimes('U');
     await gw.diagnoseWsl('U', 3100, '/home/u/.nvm/versions/node/v24.20.0/bin');
-    expect(calls.map((c) => c.cmd)).toEqual(["detect_windows", "list_wsl_distros", "probe_wsl", "is_port_open", "find_free_port", "start_env", "stop_env", "layout_tabs", "open_in_browser", "run_update", "read_env_log", "diagnose_wsl", "probe_wsl", "list_node_runtimes", "diagnose_wsl"]);
+    expect(calls.map((c) => c.cmd)).toEqual(["detect_windows", "list_wsl_distros", "scan_boot", "probe_wsl_fast", "probe_wsl", "is_port_open", "find_free_port", "start_env", "stop_env", "layout_tabs", "open_in_browser", "run_update", "read_env_log", "diagnose_wsl", "probe_wsl", "list_node_runtimes", "diagnose_wsl"]);
+    expect(calls.find((c) => c.cmd === 'scan_boot')?.args).toBeUndefined();
+    expect(calls.find((c) => c.cmd === 'probe_wsl_fast')?.args).toEqual({ distro: 'Ubuntu', wslState: 'Running' });
     expect(calls.find((c) => c.cmd === 'probe_wsl')?.args).toEqual({ distro: 'Ubuntu', nodeRuntime: null });
     expect(calls.filter((c) => c.cmd === 'probe_wsl')[1]?.args).toEqual({ distro: 'U', nodeRuntime: '/home/u/.nvm/versions/node/v24.20.0/bin' });
     expect(calls.find((c) => c.cmd === 'run_update')?.args).toMatchObject({ version: '1.0.0' });

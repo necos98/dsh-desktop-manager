@@ -1,5 +1,4 @@
 import { version as APP_VERSION } from "../package.json";
-import { layoutTabs } from "./api";
 import { tagOf } from "./registry";
 import "./styles.css";
 import {
@@ -8,6 +7,7 @@ import {
   buildLayoutInput,
   desiredVersionOf as domainDesiredVersionOf,
   envById as domainEnvById,
+  markRowProbed,
   showTabEnv,
   toolchainWarning as domainToolchainWarning,
   versionChangeOf as domainVersionChangeOf,
@@ -38,10 +38,19 @@ const envService = new EnvironmentService(defaultGateway, new BrowserSettingsSto
 let envs: EnvRow[] = [];
 let registry: RegistryData | null = null;
 let registryError: string | null = null;
+let registryStale = false;
 let selectedId: string | null = null;
 let scanning = false;
 let statusMessage = "";
 let layoutTimer: number | undefined;
+
+// Strumentazione cold-boot: fasi con timestamp (console + BOOT Rust).
+// `bootMark` stampa `BOOT <fase> +<ms>` per confrontare prima/dopo.
+const bootT0 = performance.now();
+function bootMark(phase: string): void {
+  const ms = Math.round(performance.now() - bootT0);
+  console.info(`BOOT ${phase} +${ms}ms`);
+}
 
 let viewMode: ViewMode = { view: "settings" };
 
@@ -113,14 +122,56 @@ async function scanEnvironments(showSpinner = true): Promise<void> {
   renderAll();
   try {
     const result = await envService.scanEnvironments(envs);
-    envs = result.envs;
-    if (result.status) statusMessage = result.status;
-    if (!selectedId || !envs.some((e) => e.id === selectedId)) {
-      selectedId = envs[0]?.id ?? null;
-    }
+    applyScanResult(result.envs, result.status);
     if (showSpinner) statusMessage = "";
   } finally {
     scanning = false;
+    renderAll();
+  }
+}
+
+/** Applica un risultato di scansione allo stato UI (prima pittura e
+ *  refresh condividono la stessa regola di selezione). */
+function applyScanResult(next: EnvRow[], status: string): void {
+  envs = next;
+  if (status) statusMessage = status;
+  if (!selectedId || !envs.some((e) => e.id === selectedId)) {
+    selectedId = envs[0]?.id ?? null;
+  }
+}
+
+/** Prima pittura progressiva: UN giro backend (elenco + cache), nessuna
+ *  sonda per-distro e nessuna attesa rete. Le righe arrivano subito (con
+ *  badge "Rilevamento…" dove la sonda deve ancora girare). */
+async function scanBootFast(): Promise<void> {
+  bootMark("scanBootFast-start");
+  statusMessage = "Rilevamento ambienti in corso…";
+  renderAll();
+  try {
+    const fast = await envService.scanBootFast(envs);
+    applyScanResult(fast.envs, fast.status);
+    statusMessage = "";
+  } finally {
+    bootMark("first-paint");
+    renderAll();
+  }
+}
+
+/** Arricchimento background dopo la prima pittura: una sonda per riga WSL
+ *  (sequenziale: ogni sonda scalda la sua distro una volta sola; le distro
+ *  diverse corrono in parallelo lato backend via invoke concorrenti futuri).
+ *  Ogni riga si aggiorna da sola all'arrivo della sua probe. */
+async function enrichRowsBackground(): Promise<void> {
+  const pending = envs.filter((e) => e.kind === "wsl" && !e.probe);
+  for (const row of pending) {
+    // La lista puo cambiare durante il giro (refresh/prune): salta le righe
+    // sparite invece di resuscitarle.
+    if (!envs.some((e) => e.id === row.id)) continue;
+    bootMark(`enrich-start:${row.id}`);
+    const probe = await envService.enrichRow(row);
+    if (!envs.some((e) => e.id === row.id)) continue;
+    envs = markRowProbed(envs, row.id, probe, row.wslState);
+    bootMark(`enrich-done:${row.id}`);
     renderAll();
   }
 }
@@ -142,6 +193,8 @@ async function loadRegistry(): Promise<void> {
   const outcome = await envService.loadRegistry();
   registry = outcome.registry;
   registryError = outcome.error;
+  registryStale = outcome.stale ?? false;
+  bootMark(outcome.registry ? "registry-done" : "registry-failed");
   renderDetail();
 }
 
@@ -184,7 +237,7 @@ async function applyLayout(): Promise<void> {
     Date.now(),
   );
   try {
-    await layoutTabs(input);
+    await defaultGateway.layoutTabs(input);
   } catch (err) {
     console.warn("layout_tabs:", err);
   }
@@ -813,6 +866,11 @@ function renderDetail(): void {
     er.className = "warn-box";
     er.textContent = `Registry npm non raggiungibile: ${registryError}`;
     sec2.appendChild(er);
+  } else if (registryStale && registry) {
+    const stale = document.createElement("div");
+    stale.className = "hint";
+    stale.textContent = "Versioni dall'ultima cache (rete non raggiungibile): la lista si aggiorna da sola.";
+    sec2.appendChild(stale);
   }
 
   const selRow = document.createElement("div");
@@ -1214,7 +1272,6 @@ function renderNodeRuntimeRow(e: EnvRow): HTMLElement {
     void (async () => {
       const rt = e.settings.nodeRuntime ?? null;
       try {
-        const { defaultGateway } = await import("./infra/envGateway");
         e.probe = await defaultGateway.probeWsl(e.distro ?? "", rt);
       } catch (err) {
         statusMessage = `Re-probe fallita: ${String(err)}`;
@@ -1261,9 +1318,16 @@ function buildShell(): void {
 
 buildShell();
 
+// Prima pittura sincrona dalla cache (zero I/O): la lista esiste gia al
+// primo frame, prima ancora degli invoke backend.
+registry = envService.loadCachedRegistry();
+bootMark("shell-built");
+
 void (async () => {
-  await scanEnvironments(true);
-  await loadRegistry();
+  // Prima pittura: UN giro leggero (elenco + cache, nessuna sonda
+  // per-distro) + registry cachato — interattiva in ~100ms. Rete, sonde
+  // WSL e updater check viaggiano in background senza bloccarla.
+  await scanBootFast();
   viewMode = { view: "settings" };
   renderAll();
   void applyLayout();
@@ -1271,9 +1335,16 @@ void (async () => {
   window.addEventListener("resize", scheduleLayout);
   // Polling di stato "tranquillo": 5s, niente scritture DOM se nulla cambia
   setInterval(() => void refreshRunningStates(), 5000);
-  // Check aggiornamenti manager all'avvio (silenzioso, una sola volta)
+  // Registry fresco in background (con timeout corto + cache): aggiorna la
+  // tendina versioni all'arrivo, senza bloccare la prima pittura.
+  void loadRegistry();
+  // Arricchimento righe WSL in background (una sonda per riga).
+  void enrichRowsBackground();
+  // Check aggiornamenti manager all'avvio (silenzioso, una sola volta):
+  // differito a 15s (prima era 3s) + solo a boot freddo completato, cosi
+  // non contende mai I/O e banda con le sonde di avvio.
   if (!updaterAutoChecked) {
     updaterAutoChecked = true;
-    setTimeout(() => void actionCheckManagerUpdate(true), 3000);
+    setTimeout(() => void actionCheckManagerUpdate(true), 15000);
   }
 })();

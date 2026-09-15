@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadAllSettings, MemorySettingsStorage, saveAllSettings, settingsFor } from './settingsStore';
+import { loadAllSettings, loadCachedRegistry, MemorySettingsStorage, REGISTRY_CACHE_TTL_MS, saveAllSettings, saveCachedRegistry, settingsFor } from './settingsStore';
 
 describe('loadAllSettings', () => {
   it('storage vuoto -> record vuoto', () => {
@@ -38,5 +38,27 @@ describe('settingsFor', () => {
     const storage = new MemorySettingsStorage();
     saveAllSettings(storage, [{ id: 'windows', settings: { port: 9999, extraArgs: [], workspace: null, desiredVersion: null } }]);
     expect(settingsFor(storage, 'windows', { port: 3080 }).port).toBe(9999);
+  });
+});
+
+describe('registry cache (prima pittura senza rete)', () => {
+  const data = { latest: '2.0.0', distTags: { latest: '2.0.0' }, versions: ['2.0.0', '1.0.0'] };
+  it('storage vuoto -> null', () => {
+    expect(loadCachedRegistry(new MemorySettingsStorage())).toBeNull();
+  });
+  it('salva e rilegge quando fresco', () => {
+    const s = new MemorySettingsStorage();
+    saveCachedRegistry(s, data, 1000);
+    expect(loadCachedRegistry(s, 2000)?.latest).toBe('2.0.0');
+  });
+  it('scaduto -> null', () => {
+    const s = new MemorySettingsStorage();
+    saveCachedRegistry(s, data, 1000);
+    expect(loadCachedRegistry(s, 1000 + REGISTRY_CACHE_TTL_MS + 1)).toBeNull();
+  });
+  it('JSON corrotto -> null senza lanciare', () => {
+    const s = new MemorySettingsStorage();
+    s.setItem('dsh-manager.registry-cache.v1', 'non-json{{{');
+    expect(loadCachedRegistry(s)).toBeNull();
   });
 });

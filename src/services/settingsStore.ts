@@ -1,9 +1,13 @@
 // Servizio: persistenza impostazioni per-ambiente (DIP).
 // La logica dipende dalla porta SettingsStoragePort, non da localStorage:
 // in produzione si inietta BrowserSettingsStorage, nei test MemorySettingsStorage (LSP).
-import type { EnvSettings } from '../types';
+import type { EnvSettings, RegistryData } from '../types';
 
 export const SETTINGS_KEY = 'dsh-manager.settings.v1';
+/** Ultimo registry npm noto (prima pittura senza rete: la prima pittura
+ *  dell'avvio non aspetta mai il fetch). Scade dopo REGISTRY_CACHE_TTL_MS. */
+export const REGISTRY_CACHE_KEY = 'dsh-manager.registry-cache.v1';
+export const REGISTRY_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 ore
 
 /** Porta minima di storage chiave/valore (ISP: solo cio che serve allo store). */
 export interface SettingsStoragePort {
@@ -71,4 +75,42 @@ export function settingsFor(
       desiredVersion: null,
     }
   );
+}
+
+interface RegistryCachePayload {
+  savedAt: number;
+  data: RegistryData;
+}
+
+/** Legge il registry cachato se fresco (null = assente/scaduto/corroto).
+ *  `nowMs` iniettabile per i test. Puro sullo storage. */
+export function loadCachedRegistry(
+  storage: SettingsStoragePort,
+  nowMs: number = Date.now(),
+): RegistryData | null {
+  try {
+    const raw = storage.getItem(REGISTRY_CACHE_KEY);
+    if (!raw) return null;
+    const payload = JSON.parse(raw) as RegistryCachePayload;
+    if (!payload || typeof payload.savedAt !== 'number' || !payload.data) return null;
+    if (nowMs - payload.savedAt > REGISTRY_CACHE_TTL_MS) return null;
+    if (!Array.isArray(payload.data.versions)) return null;
+    return payload.data;
+  } catch {
+    return null;
+  }
+}
+
+/** Salva il registry per la prossima prima pittura (best-effort). */
+export function saveCachedRegistry(
+  storage: SettingsStoragePort,
+  data: RegistryData,
+  nowMs: number = Date.now(),
+): void {
+  try {
+    const payload: RegistryCachePayload = { savedAt: nowMs, data };
+    storage.setItem(REGISTRY_CACHE_KEY, JSON.stringify(payload));
+  } catch {
+    /* storage non disponibile: la cache resta in memoria */
+  }
 }
