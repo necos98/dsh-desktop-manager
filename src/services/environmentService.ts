@@ -47,6 +47,21 @@ export function staleProbeFor(
   };
 }
 
+/** Nota di output per la UI: coda dell'output, mai oltre 3000 caratteri. Pura. */
+export function updateNoteOf(output: string): string {
+  return output.trim().slice(-3000);
+}
+
+/**
+ * Messaggio d'errore dell'update: riga breve + dove sta l'output completo
+ * (file di log scritto dal backend per questa esecuzione). Pura.
+ */
+export function updateErrorMessage(verb: string, exitCode: number, logPath: string | null, output: string): string {
+  const head = verb + " fallito (exit " + exitCode + ").";
+  if (logPath && logPath.trim()) return head + " Output completo salvato in " + logPath + ".";
+  return output.trim() ? head + " Output completo qui sotto." : head;
+}
+
 export interface ScanResult {
   envs: EnvRow[];
   /** Messaggio di errore non fatale (es. elenco WSL fallito) oppure "". */
@@ -76,7 +91,7 @@ export interface StopOutcome {
 
 export type UpdateOutcome =
   | { ok: true; message: string; note: string; probe: EnvProbe | null }
-  | { ok: false; error: string };
+  | { ok: false; error: string; note: string; logPath: string | null };
 
 export interface RegistryOutcome {
   registry: RegistryData | null;
@@ -339,11 +354,14 @@ export class EnvironmentService {
    * il backend sovrascrive la versione pinnata con npm (-g) in ogni caso.
    * Dopo il cambio, se l'ambiente era in esecuzione lo si riavvia
    * (stop+start) cosi la GUI gira davvero sulla nuova versione.
+   * In caso di fallimento restituisce anche l'output COMPLETO catturato
+   * (stdout+stderr, es. lo spawn di npm non partito) e il file di log scritto
+   * dal backend per quella esecuzione: la UI li mostra, non li butta via.
    */
   async updateEnvironment(e: EnvRow, registry: RegistryData | null): Promise<UpdateOutcome> {
     const target = desiredVersionOf(e, registry);
     if (!target) {
-      return { ok: false, error: "Nessuna versione selezionabile (registry non raggiungibile?)." };
+      return { ok: false, error: "Nessuna versione selezionabile (registry non raggiungibile?).", note: "", logPath: null };
     }
     const verb = versionVerb(versionChangeOf(e, registry));
     const wasRunning = e.running;
@@ -358,7 +376,7 @@ export class EnvironmentService {
       e.authSentAt = null;
     }
     const res = await this.gateway.runUpdate(targetOf(e), target);
-    const note = res.output.trim().slice(-3000);
+    const note = updateNoteOf(res.output);
     let probe: EnvProbe | null = null;
     try {
       probe = e.kind === "windows"
@@ -383,7 +401,7 @@ export class EnvironmentService {
       }
       return { ok: true, message, note, probe };
     }
-    return { ok: false, error: verb + " fallito (exit " + res.exitCode + ")." };
+    return { ok: false, error: updateErrorMessage(verb, res.exitCode, res.logPath, res.output), note, logPath: res.logPath ?? null };
   }
 
   async loadRegistry(): Promise<RegistryOutcome> {

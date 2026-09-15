@@ -2,7 +2,7 @@
 //! Dipende dalle porte CommandRunner/PortProber/FsAccess (DIP); gli spawn
 //! reali restano dietro ProcessSpawner (test: FakeSpawner, nessun processo).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -12,7 +12,7 @@ use crate::detect::{
 };
 use crate::model::{EnvTarget, WslDiag};
 use crate::proc::{find_free_port_inner, home_dir, CommandRunner, FsAccess, PortProber};
-use crate::util::extract_auth_url;
+use crate::util::{extract_auth_url, stamp_compact};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -94,6 +94,55 @@ pub fn ensure_log_dir() -> PathBuf {
 
 pub fn windows_log_path(port: u16) -> PathBuf {
     ensure_log_dir().join(format!("windows-{}.log", port))
+}
+
+/// Timestamp UTC corrente nel formato usato dai nomi dei log.
+pub fn now_stamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    stamp_compact(secs)
+}
+
+/// Nome del log di un update: `update-<kind>-<label>-<stamp>.log` (puro).
+/// `label` e l'etichetta dell'ambiente (distro o "windows"): i caratteri
+/// non sicuri diventano '-', cosi il nome non puo uscire dalla log dir.
+pub fn update_log_file_name(kind: &str, label: &str, stamp: &str) -> String {
+    format!("update-{}-{}-{}.log", safe_file_token(kind), safe_file_token(label), safe_file_token(stamp))
+}
+
+/// Token usato in un nome file: solo `[A-Za-z0-9_]`, ogni altro carattere
+/// (compresi `.` e separatori di path) diventa '-', corse di '-' accorpate.
+/// Cosi un nome distro ostile non puo uscire dalla log dir.
+fn safe_file_token(raw: &str) -> String {
+    let mut out = String::new();
+    for c in raw.chars() {
+        let mapped = if c.is_ascii_alphanumeric() || c == '_' { c } else { '-' };
+        if mapped == '-' && out.ends_with('-') {
+            continue;
+        }
+        out.push(mapped);
+    }
+    let cleaned = out.trim_matches('-').to_string();
+    if cleaned.is_empty() {
+        "env".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Scrive il log di un update nella log dir: un file per esecuzione, cosi
+/// l'output completo resta consultabile anche dopo la chiusura della UI.
+/// Err = file non scritto (l'update resta comunque valido).
+pub fn save_update_log(kind: &str, label: &str, output: &str) -> Result<PathBuf, String> {
+    let path = ensure_log_dir().join(update_log_file_name(kind, label, &now_stamp()));
+    write_log_file(&path, output).map(|()| path)
+}
+
+/// Scrittura su file del log (SRP: la scrittura resta nel modulo log).
+pub fn write_log_file(path: &Path, text: &str) -> Result<(), String> {
+    std::fs::write(path, text).map_err(|e| format!("log {}: {e}", path.display()))
 }
 
 fn read_windows_dsh_log(fs: &dyn FsAccess, port: u16) -> Option<String> {
@@ -1023,6 +1072,41 @@ mod tests {
         let r = FakeRunner::default();
         let (code, _) = run_update_with(&r, &target("wsl", None, 3100), "1.0.0");
         assert_eq!(code, -1);
+    }
+    #[test]
+    fn update_log_name_is_stable_and_safe() {
+        assert_eq!(
+            update_log_file_name("windows", "windows", "20260102-030405"),
+            "update-windows-windows-20260102-030405.log"
+        );
+        assert_eq!(
+            update_log_file_name("wsl", "Ubuntu-22.04", "20260102-030405"),
+            "update-wsl-Ubuntu-22-04-20260102-030405.log"
+        );
+        // Nome distro ostile: nessun separatore, quindi nessuna uscita dalla log dir.
+        let hostile = update_log_file_name("wsl", "../../etc/passwd", "20260102-030405");
+        assert_eq!(hostile, "update-wsl-etc-passwd-20260102-030405.log");
+        assert!(!hostile.contains('/') && !hostile.contains('\\') && !hostile.contains(".."), "{hostile}");
+    }
+    #[test]
+    fn update_log_name_falls_back_when_label_is_empty() {
+        assert_eq!(
+            update_log_file_name("wsl", "   ", "20260102-030405"),
+            "update-wsl-env-20260102-030405.log"
+        );
+    }
+    #[test]
+    fn save_update_log_writes_the_exact_output() {
+        let dir = std::env::temp_dir().join(format!("dsh-log-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(update_log_file_name("windows", "windows", "20260102-030405"));
+        // Output di spawn fallito: deve finire nel file cosi com'e.
+        let output = "errore esecuzione npm: Impossibile trovare il file specificato. (os error 2)\n";
+        write_log_file(&path, output).expect("log scritto");
+        let written = std::fs::read_to_string(&path).expect("log leggibile");
+        assert_eq!(written, output);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
     #[test]
     fn find_auth_url_returns_none_on_timeout() {

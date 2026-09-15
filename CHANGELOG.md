@@ -6,6 +6,10 @@ pubblicato come Release scaricabile dalla Action `Release`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Update/install di dsh fallito: la UI mostra l'output completo catturato (stdout+stderr, es. spawn di npm non partito -> exit -1) in un blocco monospace con pulsante «Copia», invece della sola riga "fallito (exit -1)"; il messaggio indica il file di log scritto dal backend (`logs\update-<kind>-<label>-<yyyyMMdd-HHmmss>.log`) che contiene lo stesso output.
+
 ## [0.5.0] - 2026-09-15
 
 ### Added

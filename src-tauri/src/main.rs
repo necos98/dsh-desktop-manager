@@ -36,7 +36,7 @@ use tauri::webview::{NewWindowResponse, WebviewBuilder};
 use detect::{list_node_runtimes_with, list_wsl_distros_with, probe_wsl_fast_with, probe_wsl_with_runtime, CachedDistro, PathSnapshot, WSL_BOOT_TIMEOUT, WSL_WARM_TIMEOUT};
 use lifecycle::{
     diagnose_wsl_with_runtime, find_auth_url_sync, find_free_port_with, read_env_log_with,
-    run_update_with, start_windows_with, start_wsl_with, stop_wsl_with, SystemSpawner,
+    run_update_with, save_update_log, start_windows_with, start_wsl_with, stop_wsl_with, SystemSpawner,
 };
 use model::{
     child_webview_label, env_key, EnvProbe, EnvTarget, LayoutInput, NodeRuntime, StartResult,
@@ -497,8 +497,9 @@ fn open_in_browser(url: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn run_update(target: EnvTarget, version: String) -> UpdateResult {
+    // Etichetta ambiente per il nome del log (distro WSL o "windows").
     let kind = target.kind.clone();
-    let _ = kind; // il branch vive in lifecycle::run_update_with
+    let label = target.distro.clone().unwrap_or_else(|| kind.clone());
     let result = blocking(move || -> Result<(i32, String), String> {
         let runner = proc::SystemRunner;
         let (code, output) = run_update_with(&runner, &target, &version);
@@ -506,14 +507,16 @@ async fn run_update(target: EnvTarget, version: String) -> UpdateResult {
     })
     .await;
 
-    match result {
-        Ok((exit_code, output)) => UpdateResult {
-            ok: exit_code == 0,
-            exit_code,
-            output,
-        },
-        Err(e) => UpdateResult { ok: false, exit_code: -1, output: e },
-    }
+    let (ok, exit_code, output) = match result {
+        Ok((exit_code, output)) => (exit_code == 0, exit_code, output),
+        Err(e) => (false, -1, e),
+    };
+    // Un file per esecuzione: l'output completo resta consultabile (e la UI
+    // lo mostra integrale quando l'update fallisce, es. spawn di npm fallito).
+    let log_path = save_update_log(&kind, &label, &output)
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+    UpdateResult { ok, exit_code, output, log_path }
 }
 
 // ---------------------------------------------------------------------------

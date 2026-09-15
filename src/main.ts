@@ -26,6 +26,7 @@ import {
 } from "./services/appUpdater";
 import { EnvironmentService } from "./services/environmentService";
 import { BrowserSettingsStorage } from "./services/settingsStore";
+import { renderLogBox } from "./ui/logBox";
 import type { RegistryData } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -388,6 +389,9 @@ async function actionUpdate(e: EnvRow): Promise<void> {
       }
     } else {
       statusMessage = outcome.error;
+      // Output completo dell'update fallito: mostrato nel blocco log insieme
+      // al percorso del file (il servizio lo include nel messaggio).
+      e.note = outcome.note;
     }
   } catch (err) {
     statusMessage = `${verb} fallito: ${String(err)}`;
@@ -1052,24 +1056,9 @@ function renderDetail(): void {
   }
   wrap.appendChild(actions);
 
-  // Messaggi / log
-  if (statusMessage || e.note) {
-    const logBox = document.createElement("div");
-    logBox.className = "log-box";
-    if (statusMessage) {
-      const msg = document.createElement("div");
-      msg.className = "log-msg";
-      msg.textContent = statusMessage;
-      logBox.appendChild(msg);
-    }
-    if (e.note) {
-      const note = document.createElement("pre");
-      note.className = "log-note";
-      note.textContent = e.note;
-      logBox.appendChild(note);
-    }
-    wrap.appendChild(logBox);
-  }
+  // Messaggi / log (blocco unico: messaggio + output con pulsante Copia)
+  const logBox = renderLogBox(statusMessage, e.note ?? "");
+  if (logBox) wrap.appendChild(logBox);
 
   if (!e.probe?.installed) {
     const hint = document.createElement("div");
