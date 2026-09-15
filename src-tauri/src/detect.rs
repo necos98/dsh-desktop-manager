@@ -20,6 +20,21 @@ pub const WSL_WARM_TIMEOUT: Duration = Duration::from_secs(15);
 /// deve solo stampare la versione. 15s erano troppi in avvio.
 pub const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Directory di bun: MAI considerate dal rilevamento. L'installer di bun
+/// aggiunge `%USERPROFILE%\.bun\bin` al PATH utente e il suo shim `dsh.exe`
+/// non e un'installazione npm: se e l'unico dsh presente, l'ambiente deve
+/// risultare NON installato. Pura: separatori `/` e `\` normalizzati,
+/// confronto case-insensitive.
+pub fn is_bun_dir(entry: &str) -> bool {
+    let segments: Vec<&str> = entry.split(['\\', '/']).collect();
+    if segments.iter().any(|s| s.eq_ignore_ascii_case(".bun")) {
+        return true;
+    }
+    segments
+        .windows(2)
+        .any(|w| w[0].eq_ignore_ascii_case("bun") && w[1].eq_ignore_ascii_case("bin"))
+}
+
 /// Snapshot riusabile di una scansione PATH (una sola passata sul PATH per
 /// rilevamento Windows: dsh + toolchain leggono lo stesso snapshot).
 pub struct PathSnapshot {
@@ -34,8 +49,14 @@ impl PathSnapshot {
         Self { entries }
     }
 
+    /// Cerca i nomi nelle entry del PATH SALTANDO le dir di bun (`is_bun_dir`):
+    /// la regola vive qui, una sola volta, per l'eseguibile dsh e per la
+    /// toolchain (un npm risolto da una dir bun non conta).
     pub fn find(&self, fs: &dyn FsAccess, names: &[&str]) -> Option<PathBuf> {
         for dir in &self.entries {
+            if is_bun_dir(&dir.to_string_lossy()) {
+                continue;
+            }
             for name in names {
                 let c = dir.join(name);
                 if fs.path_exists(&c) {
@@ -1083,6 +1104,56 @@ mod tests {
         assert!(empty.version.is_none());
         assert_eq!(empty.has_npm, None);
     }
+    #[test]
+    fn is_bun_dir_matches_only_bun_segments() {
+        assert!(is_bun_dir(r"C:\Users\u\.bun\bin"));
+        assert!(is_bun_dir("/home/u/.bun/bin"));
+        assert!(is_bun_dir(r"C:/Users/U/.BUN/BIN"));
+        assert!(is_bun_dir(r"C:\tools\bun\bin\dsh.exe"));
+        assert!(!is_bun_dir(r"C:\Users\u\AppData\Roaming\npm"));
+        assert!(!is_bun_dir(r"C:\Program Files\nodejs"));
+        // Segmento che CONTIENE "bun" ma non e una dir di bun.
+        assert!(!is_bun_dir(r"C:\Users\u\.bunny\bin"));
+    }
+
+    #[test]
+    fn detect_windows_ignores_bun_only_path() {
+        // dsh SOLO nello shim di bun: ambiente non installato, nessun
+        // eseguibile mostrato (nessun fallback per nome in quella dir).
+        let bun = PathBuf::from(r"C:\Users\u\.bun\bin");
+        let mut fs = FakeFs::default();
+        fs.files.insert(bun.join("dsh.exe"), String::new());
+        fs.files.insert(bun.join("dsh.cmd"), String::new());
+        fs.files.insert(bun.join("npm.cmd"), String::new());
+        let snap = PathSnapshot { entries: vec![bun] };
+        let probe = detect_windows_with_path(&FakeRunner::default(), &fs, None, &snap);
+        assert!(!probe.installed);
+        assert!(probe.executable.is_none());
+        // Un npm in dir bun non conta come toolchain.
+        assert_eq!(probe.has_npm, Some(false));
+    }
+
+    #[test]
+    fn detect_windows_skips_bun_and_keeps_normal_dirs() {
+        // PATH con bun PRIMA e una dir normale dopo: bun scavalcato del
+        // tutto, la dir normale resta valida.
+        let bun = PathBuf::from(r"C:\Users\u\.bun\bin");
+        let npm_global = PathBuf::from(r"C:\Users\u\AppData\Roaming\npm");
+        let nodejs = PathBuf::from(r"C:\Program Files\nodejs");
+        let mut fs = FakeFs::default();
+        fs.files.insert(bun.join("dsh.exe"), String::new());
+        fs.files.insert(npm_global.join("dsh.cmd"), String::new());
+        fs.files.insert(bun.join("npm.cmd"), String::new());
+        fs.files.insert(nodejs.join("npm.cmd"), String::new());
+        let snap = PathSnapshot { entries: vec![bun.clone(), npm_global, nodejs] };
+        let probe = detect_windows_with_path(&FakeRunner::default(), &fs, None, &snap);
+        assert!(probe.installed);
+        let exe = probe.executable.unwrap();
+        assert!(exe.contains("dsh.cmd"), "{exe}");
+        assert!(!exe.to_lowercase().contains(".bun"), "{exe}");
+        assert_eq!(probe.has_npm, Some(true));
+    }
+
     #[test]
     fn detect_windows_single_pass_path_snapshot() {
         // PATH finto con dsh + npm: UNA passata li trova tutti.
