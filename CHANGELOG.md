@@ -6,6 +6,8 @@ pubblicato come Release scaricabile dalla Action `Release`.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-15
+
 ### Added
 
 - Avvio veloce: comando `scan_boot` (elenco distro + cache toolchain/dsh per distro) e sonda WSL veloce a singolo spawn (HOME e `command -v dsh/npm` in un unico `bash -c`), cosi la finestra e interattiva subito.
