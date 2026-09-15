@@ -66,7 +66,7 @@ function fakeGateway(service: { lastStart?: EnvTarget }, opts: FakeOpts = {}): E
     stopEnv: async () => ({ ok: true, message: 'fermato' }) as StopResult,
     layoutTabs: async () => undefined,
     openInBrowser: async () => undefined,
-    runUpdate: async () => ({ ok: true, exitCode: 0, output: 'ok' }) as UpdateResult,
+    runUpdate: async () => ({ ok: true, exitCode: 0, output: 'ok', logPath: null }) as UpdateResult,
     readEnvLog: async (target) => [`/tmp/dsh-desktop-manager-${target.port}.log`, 'riga1\nriga2'],
     diagnoseWsl: async (distro) => ({ distro, dshInstalled: true, dshVersion: '1.0.0', hasNpm: true, portOpenFromWindows: false, portOpenInDistro: true, logTail: 'tail', state: 'Running', error: null }),
     listNodeRuntimes: async () => [{ id: '/home/u/.nvm/versions/node/v24.20.0/bin', label: 'nvm v24.20.0 (default)', nodeVersion: 'v24.20.0', isDefault: true, source: 'nvm' }],
@@ -377,5 +377,36 @@ describe('EnvironmentService.updateEnvironment', () => {
     expect(stopped).toBe(true);
     expect(e.running).toBe(true);
     if (out.ok) expect(out.message).toContain('riavviata');
+  });
+  it('update fallito -> output completo in note e percorso del file di log', async () => {
+    const seen: { lastStart?: EnvTarget } = {};
+    const gw = fakeGateway(seen);
+    const logPath = 'C:\\Users\\u\\AppData\\Roaming\\dsh-desktop-manager\\logs\\update-windows-windows-20260102-030405.log';
+    gw.runUpdate = async () => ({
+      ok: false,
+      exitCode: -1,
+      output: 'errore esecuzione npm: Impossibile trovare il file specificato. (os error 2)',
+      logPath,
+    });
+    const service = new EnvironmentService(gw, new MemorySettingsStorage(), new NpmRegistryClient(async () => { throw new Error('no-net'); }));
+    const out = await service.updateEnvironment(row(), reg);
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    // L'output del gateway arriva alla UI integro (non solo "exit -1").
+    expect(out.note).toBe('errore esecuzione npm: Impossibile trovare il file specificato. (os error 2)');
+    expect(out.logPath).toBe(logPath);
+    expect(out.error).toContain('fallito (exit -1)');
+    expect(out.error).toContain(logPath);
+  });
+  it('update fallito senza file di log -> note presente, logPath null', async () => {
+    const seen: { lastStart?: EnvTarget } = {};
+    const gw = fakeGateway(seen);
+    gw.runUpdate = async () => ({ ok: false, exitCode: 3, output: 'npm nativo mancante', logPath: null });
+    const service = new EnvironmentService(gw, new MemorySettingsStorage(), new NpmRegistryClient(async () => { throw new Error('no-net'); }));
+    const out = await service.updateEnvironment(row(), reg);
+    if (out.ok) throw new Error('atteso fallimento');
+    expect(out.note).toBe('npm nativo mancante');
+    expect(out.logPath).toBeNull();
+    expect(out.error).toContain('Output completo qui sotto');
   });
 });

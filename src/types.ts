@@ -93,6 +93,8 @@ export interface UpdateResult {
   ok: boolean;
   exitCode: number;
   output: string;
+  /** File con l'output completo di questa esecuzione (null = non scritto). */
+  logPath: string | null;
 }
 
 export interface RegistryData {

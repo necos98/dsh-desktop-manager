@@ -438,6 +438,18 @@ select:focus {
   overflow: auto;
 }
 
+/* Riga con il pulsante «Copia» sopra l'output (allineato a destra). */
+.log-note-head {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.log-note-head .btn {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
 .warn-box {
   background: rgba(255, 176, 32, 0.1);
   border: 1px solid rgba(255, 176, 32, 0.4);

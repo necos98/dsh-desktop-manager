@@ -79,6 +79,30 @@ pub fn first_semver(text: &str) -> Option<String> {
     None
 }
 
+/// Timestamp UTC compatto `yyyyMMdd-HHmmss` da secondi epoch. Pura: serve ai
+/// nomi dei file di log (un file per esecuzione), quindi niente dipendenze.
+pub fn stamp_compact(epoch_secs: u64) -> String {
+    let days = (epoch_secs / 86_400) as i64;
+    let rem = epoch_secs % 86_400;
+    let (y, m, d) = civil_from_days(days);
+    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", y, m, d, rem / 3600, (rem % 3600) / 60, rem % 60)
+}
+
+/// Giorni dall'epoch -> (anno, mese, giorno) gregoriano (algoritmo di
+/// Howard Hinnant, valido per epoch >= 0). Pura.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 /// Estrae l'URL autenticato stampato da `dsh web` su stdout
 /// (riga "dsh web: http://127.0.0.1:<porta>/?token=...").
 /// Restituisce il primo URL con `token=`; l'eventuale URL LAN tra parentesi viene ignorato.
@@ -197,5 +221,18 @@ mod tests {
     fn extract_auth_url_trims_trailing_punct() {
         let text = "dsh web: http://127.0.0.1:3080/?token=abc).";
         assert_eq!(extract_auth_url(text), Some("http://127.0.0.1:3080/?token=abc".to_string()));
+    }
+
+    #[test]
+    fn stamp_compact_formats_utc() {
+        assert_eq!(stamp_compact(0), "19700101-000000");
+        assert_eq!(stamp_compact(1_700_000_000), "20231114-221320");
+        assert_eq!(stamp_compact(1_757_934_000), "20250915-110000");
+    }
+
+    #[test]
+    fn stamp_compact_handles_non_leap_century() {
+        // 2100 non e bisestile: il 1 gennaio resta il giorno giusto.
+        assert_eq!(stamp_compact(4_102_444_800), "21000101-000000");
     }
 }

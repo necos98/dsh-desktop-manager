@@ -107,6 +107,10 @@ pub struct UpdateResult {
     pub ok: bool,
     pub exit_code: i32,
     pub output: String,
+    /// Percorso del file con l'output completo di QUESTA esecuzione
+    /// (`update-<kind>-<label>-<stamp>.log` nella log dir). None = log non
+    /// scritto: la UI mostra comunque `output`.
+    pub log_path: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
