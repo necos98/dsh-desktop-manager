@@ -34,16 +34,54 @@ pub trait FsAccess: Send + Sync {
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Nome dell'interprete per i wrapper Windows (`.cmd`/`.bat`).
+const CMD_EXE: &str = "cmd.exe";
+/// Switch che esegue il comando e termina (exit code propagato).
+const CMD_SWITCH: &str = "/C";
+
+/// Come lanciare `prog` su Windows: `(programma, argomenti di prefisso)`.
+///
+/// Node/npm installano gli shim come `npm.cmd`/`dsh.cmd` (piu il gemello
+/// `npm` senza estensione): `Command::new` li cerca solo con `.exe`
+/// (CreateProcessW non consulta PATHEXT) e fallisce con "program not found".
+/// I wrapper vanno quindi lanciati via `cmd.exe /C`, che risolve PATH +
+/// PATHEXT. Restano diretti i binari con estensione eseguibile reale
+/// (`.exe`/`.com`): nessuna shell in piu per `wsl.exe`.
+/// Fuori da Windows nessun wrapper esiste: il programma resta diretto.
+pub fn windows_launch(prog: &str) -> (String, Vec<String>) {
+    if cfg!(windows) && needs_cmd_shell(prog) {
+        (CMD_EXE.to_string(), vec![CMD_SWITCH.to_string(), prog.to_string()])
+    } else {
+        (prog.to_string(), Vec::new())
+    }
+}
+
+/// `true` per i programmi che CreateProcessW non esegue: wrapper
+/// `.cmd`/`.bat` e nomi senza estensione (`npm`, che `cmd` risolve col
+/// PATHEXT). Un nome con estensione diversa (`.exe`, `.com`) resta diretto.
+fn needs_cmd_shell(prog: &str) -> bool {
+    let Some(name) = Path::new(prog).file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    match name.to_ascii_lowercase().rsplit_once('.') {
+        Some((_, "cmd" | "bat")) => true,
+        Some(_) => false,
+        None => true,
+    }
+}
+
 pub struct SystemRunner;
 
 impl CommandRunner for SystemRunner {
     fn run_capture(&self, prog: &str, args: &[&str], timeout: Duration) -> Result<(i32, String, String), String> {
-        let prog = prog.to_string();
-        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let (launch, prefix) = windows_launch(prog);
+        let args: Vec<String> = prefix.into_iter().chain(args.iter().map(|s| s.to_string())).collect();
         let (tx, rx) = mpsc::channel();
-        let prog_msg = prog.clone();
+        // Il messaggio d'errore nomina il programma chiesto dall'utente
+        // (`npm`), non l'interprete usato per lanciarlo.
+        let prog_msg = prog.to_string();
         std::thread::spawn(move || {
-            let mut cmd = Command::new(&prog);
+            let mut cmd = Command::new(&launch);
             cmd.args(&args);
             // Niente prompt lampeggianti (probe wsl.exe, dsh --version...).
             #[cfg(windows)]
@@ -287,6 +325,61 @@ mod tests {
         let fs = FakeFs::with("/x/package.json", "hello");
         assert_eq!(fs.read_to_string(std::path::Path::new("/x/package.json")).as_deref(), Some("hello"));
         assert!(!fs.path_exists(std::path::Path::new("/missing")));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_launch_routes_wrappers_through_cmd_shell() {
+        let (prog, args) = windows_launch(r"C:\Users\u\AppData\Roaming\npm\dsh.cmd");
+        assert_eq!(prog, "cmd.exe");
+        assert_eq!(args, vec!["/C", r"C:\Users\u\AppData\Roaming\npm\dsh.cmd"]);
+
+        let (prog, args) = windows_launch(r"C:\Program Files\nodejs\npm.CMD");
+        assert_eq!(prog, "cmd.exe");
+        assert_eq!(args, vec!["/C", r"C:\Program Files\nodejs\npm.CMD"]);
+
+        let (prog, args) = windows_launch("run.bat");
+        assert_eq!(prog, "cmd.exe");
+        assert_eq!(args, vec!["/C", "run.bat"]);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_launch_sends_bare_names_to_cmd_shell() {
+        // `npm` senza estensione: CreateProcessW cerca solo `npm.exe`, mentre
+        // lo shim reale e `npm.cmd` -> serve `cmd /C` (PATHEXT).
+        let (prog, args) = windows_launch("npm");
+        assert_eq!(prog, "cmd.exe");
+        assert_eq!(args, vec!["/C", "npm"]);
+
+        let (prog, args) = windows_launch(r"C:\tools\dsh");
+        assert_eq!(prog, "cmd.exe");
+        assert_eq!(args, vec!["/C", r"C:\tools\dsh"]);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_launch_keeps_real_executables_direct() {
+        for prog in ["wsl.exe", r"C:\Program Files\nodejs\node.exe", "cmd.com", r"C:\tools\a.b.exe"] {
+            let (launched, args) = windows_launch(prog);
+            assert_eq!(launched, prog, "lancio diretto atteso per {prog}");
+            assert!(args.is_empty(), "nessun prefisso atteso per {prog}");
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn system_runner_executes_cmd_wrapper_with_spaced_path() {
+        // Live: caso reale `npm.cmd` in `C:\Program Files\nodejs`.
+        let dir = std::env::temp_dir().join(format!("dsh proc test {}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let script = dir.join("wrap.cmd");
+        std::fs::write(&script, "@echo off\r\necho wrapper-ok\r\n").expect("script");
+        let res = SystemRunner.run_capture(&script.to_string_lossy(), &[], Duration::from_secs(30));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (code, out, err) = res.expect("run_capture wrapper");
+        assert_eq!(code, 0, "stderr: {err}");
+        assert!(out.contains("wrapper-ok"), "stdout: {out:?}");
     }
 
     #[test]
